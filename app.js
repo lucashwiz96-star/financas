@@ -329,6 +329,51 @@ function mergeDB(local, remote) {
   if ((lc.updatedAt || '') > (rc.updatedAt || '')) { out.config = lc; localNewer = true; } else out.config = Object.assign(DEFAULT_CONFIG(), rc);
   return { data: out, localNewer };
 }
+/* ---- troca manual entre aparelhos (sem nuvem) ---- */
+function contaNovos(de, para) { // itens de `de` que são novos ou mais recentes que em `para`
+  let n = 0;
+  for (const c of COLS) { const m = new Map((para[c] || []).map(x => [x.id, x.updatedAt || ''])); for (const x of de[c] || []) if (!m.has(x.id) || (x.updatedAt || '') > m.get(x.id)) n++; }
+  if (((de.config || {}).updatedAt || '') > ((para.config || {}).updatedAt || '')) n++;
+  return n;
+}
+function pendentesEnvio() {
+  if (!SET.lastExport && !DB.lancamentos.length) return 0;
+  const t = SET.lastExport || ''; let n = 0;
+  for (const c of COLS) for (const x of DB[c]) if ((x.updatedAt || '') > t) n++;
+  if ((DB.config.updatedAt || '') > t) n++;
+  return n;
+}
+async function enviarAparelho() {
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-');
+  const txt = JSON.stringify(DB);
+  const marcar = () => { SET.lastExport = nowTS(); saveSet(); updateSyncBadge(); if (route() === 'ajustes') render(); };
+  if (navigator.share && navigator.canShare) {
+    const cand = [new File([txt], `financas-${stamp}.json`, { type: 'application/json' }), new File([txt], `financas-${stamp}.txt`, { type: 'text/plain' })];
+    const f = cand.find(x => { try { return navigator.canShare({ files: [x] }); } catch { return false; } });
+    if (f) {
+      try { await navigator.share({ files: [f], title: 'Finanças — dados' }); marcar(); toast('Enviado ✓ No outro aparelho: Ajustes → Receber.'); return; }
+      catch (e) { if (e.name === 'AbortError') return; }
+    }
+  }
+  download(`financas-${stamp}.json`, txt, 'application/json'); marcar();
+  toast('Arquivo salvo. Mande-o para o outro aparelho (WhatsApp, e-mail, cabo…).');
+}
+async function receberAparelho(file) {
+  let data; try { data = JSON.parse(await file.text()); } catch { return toast('Arquivo inválido.'); }
+  if (data.app !== 'financas') return toast('Este arquivo não é do app Finanças.');
+  const vazio = !DB.lancamentos.length;
+  const n = contaNovos(data, DB), emDia = vazio || pendentesEnvio() === 0;
+  if (vazio) { data.config ||= {}; data.config.updatedAt ||= nowTS(); DB = Object.assign(emptyDB(), data); DB.config = Object.assign(DEFAULT_CONFIG(), data.config); }
+  else DB = mergeDB(DB, data).data;
+  for (const c of COLS) DB[c] ||= [];
+  SET.lastImport = nowTS();
+  // se nada daqui estava pendente, o que chegou já está no outro aparelho: continua "em dia"
+  if (emDia) { let mx = (DB.config.updatedAt || ''); for (const c of COLS) for (const x of DB[c]) if ((x.updatedAt || '') > mx) mx = x.updatedAt; SET.lastExport = mx || SET.lastImport; }
+  saveSet(); persist();
+  if (vazio) toast(`Dados carregados ✓ ${DB.lancamentos.filter(l => !l.deleted).length} lançamentos.`); else toast(n ? `Recebido ✓ ${n} ${n === 1 ? 'alteração juntada' : 'alterações juntadas'}.` : 'Recebido ✓ Nada novo — os dois aparelhos já estavam iguais.');
+  if (vazio) state.mes = curYM();
+  render();
+}
 async function callApi(body) {
   const res = await fetch(SET.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ key: SET.key, ...body }), redirect: 'follow' });
   if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -337,7 +382,7 @@ async function callApi(body) {
   return j;
 }
 async function sync(manual) {
-  if (!SET.url || !SET.key) { if (manual) { location.hash = '#/ajustes'; toast('Configure a sincronização com o Google Drive.'); } return; }
+  if (!SET.url || !SET.key) { if (manual) location.hash = '#/ajustes'; return; }
   if (syncing) return; if (!navigator.onLine) { if (manual) toast('Sem internet — os dados ficam salvos no aparelho.'); return; }
   syncing = true; updateSyncBadge();
   try {
@@ -362,8 +407,16 @@ async function sync(manual) {
 }
 function updateSyncBadge() {
   const b = $('#syncBtn'); if (!b) return;
-  b.className = 'sync ' + (syncing ? 'busy pend' : !SET.url ? '' : SET.syncErr ? 'err' : SET.dirty ? 'pend' : 'ok');
-  $('.sync-txt', b).textContent = syncing ? 'Sincronizando' : !SET.url ? 'Só local' : SET.syncErr ? 'Erro' : SET.dirty ? 'Pendente' : 'Drive ✓';
+  if (!SET.url) {
+    const n = pendentesEnvio();
+    b.className = 'sync ' + (n ? 'pend' : SET.lastExport ? 'ok' : '');
+    $('.sync-txt', b).textContent = n ? `${n} p/ enviar` : SET.lastExport ? 'Em dia' : 'Só local';
+    b.title = n ? `${n} alterações ainda não enviadas ao outro aparelho — toque para enviar` : 'Trocar dados com o outro aparelho';
+    return;
+  }
+  b.className = 'sync ' + (syncing ? 'busy pend' : SET.syncErr ? 'err' : SET.dirty ? 'pend' : 'ok');
+  $('.sync-txt', b).textContent = syncing ? 'Sincronizando' : SET.syncErr ? 'Erro' : SET.dirty ? 'Pendente' : 'Drive ✓';
+  b.title = 'Sincronizar';
 }
 
 /* ---------------- UI base ---------------- */
@@ -378,7 +431,7 @@ const ROUTES = [
   { id: 'indicadores', t: 'Alertas e ajustes', i: 'bulb' },
   { id: 'investimentos', t: 'Investimentos', i: 'piggy' },
   { id: 'cadastros', t: 'Cadastros', i: 'tag' },
-  { id: 'ajustes', t: 'Ajustes e Drive', i: 'gear' },
+  { id: 'ajustes', t: 'Ajustes e troca de dados', i: 'gear' },
 ];
 function buildNav() {
   $('#sideNav').innerHTML = ROUTES.map(r => `<a href="#/${r.id}" data-r="${r.id}">${icon(r.i)}${r.t}</a>`).join('');
@@ -526,7 +579,7 @@ function emptyState() {
   return `<div class="card empty" style="max-width:560px;margin:30px auto"><b>Bem-vindo! 👋</b>
     Ainda não há dados neste aparelho.<br><br>
     • <b>Primeiro uso:</b> vá em <a class="link" href="#/ajustes">Ajustes</a> e importe o arquivo <code>carga_inicial.json</code> gerado da sua planilha.<br>
-    • <b>Já usa em outro aparelho?</b> Configure a sincronização com o Google Drive em <a class="link" href="#/ajustes">Ajustes</a>.<br><br>
+    • <b>Já usa em outro aparelho?</b> Lá, toque em <i>Enviar para o outro aparelho</i>; aqui, em <a class="link" href="#/ajustes">Ajustes</a> → <i>Receber do outro aparelho</i>.<br><br>
     <button class="btn primary" data-act="novo">+ Fazer um lançamento</button></div>`;
 }
 
@@ -763,9 +816,18 @@ function salvarCadastros() {
 }
 
 /* ---- Ajustes / Drive ---- */
-VIEWS.ajustes = () => `<div class="grid c2">
-  <div class="card"><h2>Sincronização com Google Drive</h2>
-    <p class="small muted" style="margin-top:0">Seus dados ficam salvos neste aparelho e são sincronizados com o arquivo <code>financas.json</code> no seu Google Drive (via um Apps Script seu). Veja o passo a passo no LEIAME.</p>
+const dtBR = ts => new Date(ts).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+VIEWS.ajustes = () => { const pend = pendentesEnvio(); return `<div class="grid c2">
+  <div class="card"><h2>Trocar dados com o outro aparelho</h2>
+    <p class="small muted" style="margin-top:0">Sem nuvem: envie um arquivo deste aparelho para o outro (WhatsApp para você mesmo, e-mail, cabo…) e lá toque em <b>Receber</b>. Os lançamentos dos dois lados são juntados — nada é apagado.</p>
+    <div class="stack" style="gap:10px">
+      <button class="btn primary block" data-act="enviarAparelho">📤 Enviar para o outro aparelho${pend ? ` · ${pend} novas` : ''}</button>
+      <label class="btn block" style="justify-content:center;cursor:pointer">📥 Receber do outro aparelho<input type="file" id="fReceber" accept=".json,.txt,application/json,text/plain" hidden></label>
+    </div>
+    <p class="small muted">${SET.lastExport ? 'Último envio: ' + dtBR(SET.lastExport) : 'Ainda não enviado.'} · ${SET.lastImport ? 'Último recebimento: ' + dtBR(SET.lastImport) : 'Nada recebido ainda.'}
+    ${pend ? `<br><span class="warn-t">${pend} ${pend === 1 ? 'alteração feita aqui ainda não foi enviada' : 'alterações feitas aqui ainda não foram enviadas'}.</span>` : ''}</p></div>
+  <div class="card"><h2>Sincronização automática (opcional)</h2>
+    <p class="small muted" style="margin-top:0">Só se quiser que os aparelhos se atualizem sozinhos, via um Apps Script seu no Google Drive (passo a passo no LEIAME). Sem isso, use a troca manual acima.</p>
     <label class="field"><span>URL do Web App (Apps Script)</span><input class="input" id="sUrl" value="${esc(SET.url || '')}" placeholder="https://script.google.com/macros/s/…/exec"></label>
     <label class="field"><span>Chave secreta</span><input class="input" id="sKey" type="password" value="${esc(SET.key || '')}" placeholder="a mesma definida no script"></label>
     <div class="row"><button class="btn primary" data-act="salvarSync">Salvar e sincronizar</button>${SET.url ? '<button class="btn" data-act="desligarSync">Desconectar</button>' : ''}</div>
@@ -777,8 +839,8 @@ VIEWS.ajustes = () => `<div class="grid c2">
     <div class="row" style="flex-wrap:wrap"><button class="btn" data-act="backup">Baixar backup (.json)</button><button class="btn" data-act="csv">Exportar lançamentos (CSV)</button></div>
     <p class="small muted">${LIVE.length} lançamentos · ${DB.config.subcategorias.length} subcategorias · ${(JSON.stringify(DB).length / 1024).toFixed(0)} KB</p></div>
   <div class="card"><h2>Aparência</h2><div class="seg" style="max-width:320px">${['auto', 'light', 'dark'].map(t => `<button class="${(SET.theme || 'auto') === t ? 'on' : ''}" data-act="tema" data-t="${t}">${{ auto: 'Automático', light: 'Claro', dark: 'Escuro' }[t]}</button>`).join('')}</div></div>
-  <div class="card"><h2>Zona de perigo</h2><button class="btn danger" data-act="limpar">Apagar dados deste aparelho</button><p class="tiny muted">Não apaga o arquivo do Google Drive.</p></div>
-</div>`;
+  <div class="card"><h2>Zona de perigo</h2><button class="btn danger" data-act="limpar">Apagar dados deste aparelho</button><p class="tiny muted">Envie para o outro aparelho ou baixe um backup antes.</p></div>
+</div>`; };
 
 VIEWS.mais = () => `<div class="card"><div class="more-grid">${ROUTES.filter(r => !['inicio'].includes(r.id)).map(r => `<a href="#/${r.id}">${icon(r.i)}${r.t}</a>`).join('')}</div></div>
   <div style="margin-top:14px">${VIEWS.indicadores()}</div>`;
@@ -937,7 +999,8 @@ const ACTS = {
   fechar: () => closeSheet(),
   mes: t => { state.mes = addM(state.mes, +t.dataset.d); state.semana = null; render(); },
   mesHoje: () => { state.mes = curYM(); state.semana = null; render(); },
-  sync: () => sync(true),
+  sync: () => { if (SET.url) return sync(true); if (pendentesEnvio()) return enviarAparelho(); location.hash = '#/ajustes'; },
+  enviarAparelho: () => enviarAparelho(),
   editar: t => { const l = DB.lancamentos.find(x => x.id === t.dataset.id); if (l) formLanc(l); },
   tipoL: t => { const f = $('#fLanc'); f.tipo.value = t.dataset.t; $$('[data-act="tipoL"]', f).forEach(b => b.className = b === t ? 'on ' + (t.dataset.t === 'Despesa' ? 'desp' : 'rec') : ''); fillSubs(f, t.dataset.t); if (t.dataset.t === 'Receita' && FORMAMAP.has('Transferência')) setChip(f, 'formaChips', 'forma', 'Transferência'); infoLanc(f); },
   subL: t => { const f = $('#fLanc'); setChip(f, 'subChips', 'sub', t.dataset.v); infoLanc(f); },
@@ -1006,7 +1069,7 @@ const ACTS = {
     download(`lancamentos-${todayISO()}.csv`, '﻿' + [h.map(q).join(';'), ...rows].join('\r\n'), 'text/csv');
   },
   tema: t => { SET.theme = t.dataset.t; saveSet(); applyTheme(); render(); },
-  limpar: () => { if (confirm('Apagar TODOS os dados deste aparelho? (o Google Drive não é afetado)')) { localStorage.removeItem(LS_DB); DB = emptyDB(); SET.dirty = false; SET.rev = 0; saveSet(); reindex(); render(); } },
+  limpar: () => { if (confirm('Apagar TODOS os dados deste aparelho? Isso não pode ser desfeito.')) { localStorage.removeItem(LS_DB); DB = emptyDB(); SET.dirty = false; SET.rev = 0; saveSet(); reindex(); render(); } },
 };
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
 function applyTheme() { const t = SET.theme; if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
@@ -1021,6 +1084,7 @@ document.addEventListener('click', e => {
 document.addEventListener('change', e => {
   const t = e.target;
   if (t.dataset.act && ['pagar', 'selParc', 'projSub'].includes(t.dataset.act)) return ACTS[t.dataset.act](t);
+  if (t.id === 'fReceber') { const f = t.files[0]; t.value = ''; if (f) receberAparelho(f); return; }
   if (t.dataset.act === 'saldoInst') { const i = DB.config.instituicoes[+t.dataset.k]; i.saldo = r2(parseNum(t.value)); saveConfig(); render(); return; }
   if (t.dataset.filtro) { state.filtro[t.dataset.filtro] = t.type === 'checkbox' ? t.checked : t.value; render(); }
 });
