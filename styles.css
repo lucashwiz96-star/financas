@@ -298,3 +298,18 @@ svg,img{max-width:100%}
 .hero .row .lbl{opacity:.85}
 .mob .card > .list > .li:first-child{padding-top:2px}
 @media (max-width:1023.98px){.info-btn{width:26px;height:26px;font-size:13px;position:relative}.info-btn::after{content:"";position:absolute;inset:-8px}}
+
+/* v7: alertas compactos, resumo do mês, contas */
+details.alert.mini{display:block;padding:0}
+details.alert.mini>summary{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;list-style:none}
+details.alert.mini>summary::-webkit-details-marker{display:none}
+details.alert.mini>summary::after{content:'›';color:var(--faint);font-size:18px;transition:transform .15s}
+details.alert.mini[open]>summary::after{transform:rotate(90deg)}
+details.alert.mini .alert-body{padding:0 12px 12px 44px;font-size:13.5px;color:var(--muted)}
+details.alert.mini + details.alert.mini{margin-top:8px}
+.resumo-card{border-color:var(--brand);background:var(--brand-soft)}
+.resumo-card .t{font-size:15px}
+.rs-h{margin:16px 0 4px;font-size:13px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.li.conta.paga .t{color:var(--faint);text-decoration:line-through}
+.li.conta.paga .num{color:var(--faint)}
+.card > h2 .info-btn{vertical-align:middle}

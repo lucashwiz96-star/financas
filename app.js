@@ -213,19 +213,21 @@ function contaValor(c, m) {
   else if (c.forma) ls = es.filter(l => l.forma === c.forma);
   if (ls.length) return { v: sum(ls, l => l.valor), est: ls.every(l => l.virtual) };
   if (c.sub) { const f = FIXOS.filter(l => l.sub === c.sub).sort((a, b) => b.data.localeCompare(a.data))[0]; if (f) return { v: f.valor, est: true }; }
-  return { v: +c.valorPadrao || 0, est: true };
+  return { v: +c.valorPadrao || 0, est: !!(c.sub || c.forma) }; // conta de valor fixo não é estimativa
 }
 function contasDoMes(m) {
   const today = todayISO();
-  return DB.config.contas.map(c => {
+  return DB.config.contas.filter(c => (!c.desde || m >= c.desde) && (!c.ate || m <= c.ate)).map(c => {
     const ck = DB.checks.find(x => x.id === `${m}|${c.id}` && !x.deleted);
-    const { v, est } = contaValor(c, m);
-    const venc = c.dia ? `${m}-${pad(Math.min(c.dia, daysInMonth(m)))}` : null;
+    const auto = contaValor(c, m);
+    // ajuste só deste mês (valor/vencimento) fica no registro do checklist do mês
+    const man = ck && ck.valorMan != null, v = man ? ck.valorMan : auto.v, est = man ? false : auto.est;
+    const venc = ck?.venc || (c.dia ? `${m}-${pad(Math.min(c.dia, daysInMonth(m)))}` : null);
     let st = 'A pagar', cls = '';
     if (ck && ck.pago) { st = 'Pago'; cls = 'pos'; }
     else if (venc && venc < today) { st = 'Vencida'; cls = 'danger'; }
     else if (venc && (toDate(venc) - toDate(today)) / 864e5 <= 3) { st = 'Vence em breve'; cls = 'warn'; }
-    return { c, ck, v, est, venc, st, cls, pago: !!(ck && ck.pago) };
+    return { c, ck, v, est, venc, st, cls, pago: !!(ck && ck.pago), auto: auto.v, man };
   });
 }
 
@@ -523,7 +525,41 @@ function spark(vals, w = 90, h = 24) {
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${vals.map((v, i) => `${i * st},${h - 2 - (v / max) * (h - 4)}`).join(' ')}" fill="none" stroke="var(--brand-2)" stroke-width="1.6"/></svg>`;
 }
 const barHtml = (u, mark, neutro) => `<div class="bar ${neutro ? '' : u >= 1 ? 'over' : u >= .8 ? 'warn' : ''}"><i style="width:${Math.min(100, Math.max(0, u * 100)).toFixed(1)}%"></i>${mark != null ? `<span class="mark" style="left:${Math.min(100, mark * 100)}%"></span>` : ''}</div>`;
+/** Alerta em uma linha; o detalhe abre ao tocar. */
+function alertMini(a) {
+  const ic = { danger: '!', warn: '!', info: 'i', ok: '✓', tip: '★' }[a.lvl];
+  const plano = a.txt.replace(/<[^>]+>/g, '');
+  let k = a.txt.indexOf(':'); if (k > 0 && (a.txt.slice(0, k).split('(').length > a.txt.slice(0, k).split(')').length)) k = -1;
+  const titulo = k > 0 && k < 90 ? a.txt.slice(0, k).replace(/<[^>]+>/g, '') : (plano.split(/(?<=\.)\s/)[0] || plano).slice(0, 80);
+  const corpo = k > 0 && k < 90 ? a.txt.slice(k + 1) : a.txt;
+  const n = k > 0 ? (a.txt.slice(k + 1).match(/<b>/g) || []).length : 0;
+  return `<details class="alert ${a.lvl} mini"><summary><span class="ai">${ic}</span><span class="grow">${titulo}</span>${n > 1 ? `<span class="tag">${n}</span>` : ''}</summary><div class="alert-body">${corpo}${a.link ? ` <a class="link" href="${a.link}">ver</a>` : ''}</div></details>`;
+}
 const alertHtml = a => `<div class="alert ${a.lvl}"><span class="ai">${{ danger: '!', warn: '!', info: 'i', ok: '✓', tip: '★' }[a.lvl]}</span><div>${a.txt}${a.link ? ` <a class="link" href="${a.link}">ver</a>` : ''}</div></div>`;
+
+/* ---------------- resumo do mês que fechou ---------------- */
+function resumoMes(pm) {
+  const s = summary(pm), ant = summary(addM(pm, -1)), R = DB.config.regras;
+  const varCat = Object.entries(s.byCat).map(([c, v]) => { const a = histAvg(pm, x => x.byCat[c] || 0); return { c, v, a, d: a ? v - a : 0 }; });
+  const subiu = varCat.filter(x => x.a && x.d > 100 && x.v > x.a * 1.15).sort((a, b) => b.d - a.d).slice(0, 3);
+  const caiu = varCat.filter(x => x.a && x.d < -100).sort((a, b) => a.d - b.d).slice(0, 2);
+  const wd = weeklyData(pm), estouradas = wd.rows.filter(r => r.limSem > 1 && r.eco < 0).sort((a, b) => a.eco - b.eco);
+  const okCx = wd.rows.filter(r => r.limSem > 1 && r.eco >= 0).length;
+  return { pm, s, ant, subiu, caiu, estouradas, okCx, meta: R.metaPoupanca, top: Object.entries(s.byCat).sort((a, b) => b[1] - a[1]).slice(0, 3) };
+}
+function htmlResumoMes(pm) {
+  const r = resumoMes(pm), s = r.s, d = s.saldo - r.ant.saldo;
+  const lin = (l, v, c = '') => `<div class="row between sub-l"><span class="muted">${l}</span><b class="num ${c}">${v}</b></div>`;
+  return `${sheetHead('Como foi ' + ymLong(pm))}
+    <div class="card hero" style="margin-bottom:12px"><div class="lbl">${s.saldo >= 0 ? 'Sobrou' : 'Faltou'}</div><div class="big">${money(Math.abs(s.saldo))}</div>
+      <div class="lbl">${d >= 0 ? '▲' : '▼'} ${money(Math.abs(d))} vs. ${ymShort(addM(pm, -1))} · poupança ${pct(s.poupanca)} (meta ${pct(r.meta)})</div></div>
+    ${lin('Receitas', money(s.rec))}${lin('Despesas', money(s.desp))}${lin('Fatura do cartão paga', money(s.fatura))}
+    <h3 class="rs-h">Onde mais gastou</h3>${r.top.map(([c, v]) => lin(catEmoji(c) + ' ' + esc(c), money(v))).join('')}
+    ${r.subiu.length ? `<h3 class="rs-h">Acima da sua média</h3>${r.subiu.map(x => lin(catEmoji(x.c) + ' ' + esc(x.c), '+' + money(x.d), 'warn-t')).join('')}` : ''}
+    ${r.caiu.length ? `<h3 class="rs-h">Economizou</h3>${r.caiu.map(x => lin(catEmoji(x.c) + ' ' + esc(x.c), '−' + money(-x.d), 'pos')).join('')}` : ''}
+    <h3 class="rs-h">Caixinhas</h3>${r.estouradas.length ? r.estouradas.map(x => lin(esc(x.sub), 'estourou ' + money(-x.eco), 'neg')).join('') : ''}
+    <p class="small muted" style="margin:8px 0 0">${r.okCx} ${r.okCx === 1 ? 'caixinha ficou' : 'caixinhas ficaram'} dentro do limite${r.estouradas.length ? `, ${r.estouradas.length} ${r.estouradas.length === 1 ? 'estourou' : 'estouraram'}` : ' — todas no azul 👏'}.</p>`;
+}
 
 /* ---------------- telas ---------------- */
 const VIEWS = {};
@@ -618,9 +654,13 @@ VIEWS.inicio = () => {
   const semM = semRows.length ? `<div class="card"><h2>Esta semana <a href="#/semanal">controle →</a></h2>${semRows.map(({ r, w }) => `<div class="catrow"><div class="row"><span class="grow ellipsis">${esc(r.sub)}</span><span class="num small"><b class="${w.over ? 'danger-t' : ''}">${money(w.v)}</b> <span class="faint">/ ${money(w.lim)}</span></span></div>${barHtml(w.lim ? w.v / w.lim : 0)}</div>`).join('')}</div>` : '';
   const catM = cats.length ? `<div class="card"><h2>Maiores gastos de ${ymShort(m)} <a href="#/projecao">todos →</a></h2>${cats.slice(0, 4).map(([c, v]) => `<div class="catrow"><div class="row"><span>${catEmoji(c)}</span><span class="grow ellipsis">${esc(c)}</span><b class="num small">${money(v)}</b></div>${barHtml(v / (cats[0][1] || 1), null, true)}</div>`).join('')}</div>` : '';
   const ultM = `<div class="card"><h2>Últimos lançados <a href="#/lancamentos">extrato →</a></h2><div class="list">${ultimos.map(liLanc).join('') || '<div class="empty">Nada lançado ainda.</div>'}</div></div>`;
-  const mobile = `<div class="stack mob">${heroM}${resumoM}${semM}${catM}${ultM}</div>`;
+  const pm = addM(cur, -1), rmes = summary(pm);
+  const resumoCard = +todayISO().slice(8, 10) <= 10 && SET.resumoVisto !== pm && rmes.rec + rmes.desp > 0
+    ? `<div class="card resumo-card click" data-act="verResumo" data-m="${pm}"><div class="row"><span style="font-size:22px">📊</span><div class="grow"><div class="t"><b>${ymLong(pm)} fechou</b></div><div class="small muted">${rmes.saldo >= 0 ? 'sobraram' : 'faltaram'} <b class="${rmes.saldo >= 0 ? 'pos' : 'neg'}">${money(Math.abs(rmes.saldo))}</b> · toque para ver o resumo</div></div><button class="icon-btn" data-act="dispensarResumo" data-m="${pm}" aria-label="Dispensar">×</button></div></div>` : '';
+  const mobile = `<div class="stack mob">${resumoCard}${heroM}${resumoM}${semM}${catM}${ultM}</div>`;
 
   return `${mobile}<div class="stack desk">
+    ${resumoCard}
     ${kpis}
     <div class="card desk"><h2>Receitas × despesas × saldo <a href="#/projecao">tabela →</a></h2>${chartMeses(months)}</div>
     <div class="grid c3">
@@ -692,7 +732,7 @@ VIEWS.lancamentos = () => {
     <select class="input" data-filtro="fixo"><option value="">Fixas e variáveis</option><option value="sim" ${f.fixo === 'sim' ? 'selected' : ''}>Só fixas (mensais)</option><option value="nao" ${f.fixo === 'nao' ? 'selected' : ''}>Só variáveis</option></select>
     ${nFiltros ? '<button class="btn sm" data-act="limparFiltros">Limpar</button>' : ''}</div></details>
   </div>
-  <div class="row small" style="margin-bottom:10px;gap:14px;flex-wrap:wrap"><span class="muted">${ls.length} lançamentos ${descPeriodo}</span><span class="pos">Receitas ${money(tr)}</span><span class="neg">Despesas ${money(td)}</span>
+  <div class="row small" style="margin-bottom:10px;gap:14px;flex-wrap:wrap"><span class="muted">${ls.length} lançamentos ${descPeriodo}</span><span class="desk pos">Receitas ${money(tr)}</span><span class="desk neg">Despesas ${money(td)}</span><span class="mob">${tip(`Receitas ${money(tr)}<br>Despesas ${money(td)}`)}</span>
     <span class="grow"></span><button class="btn sm desk" data-act="csv">Exportar CSV</button></div>`;
 
   const mobile = (() => {
@@ -849,15 +889,65 @@ function controleMensal(m, wd) {
 
 /* ---- Contas ---- */
 VIEWS.contas = () => {
-  const m = state.mes, cs = contasDoMes(m), pagas = cs.filter(c => c.pago);
-  return `<div class="card"><h2>Checklist de ${ymLong(m)} <span class="small muted">${pagas.length} de ${cs.length} pagas · ${money(sum(pagas, c => c.v))} de ${money(sum(cs, c => c.v))}</span></h2>
+  const m = state.mes, cs = contasDoMes(m), pagas = cs.filter(c => c.pago), falta = sum(cs.filter(c => !c.pago), c => c.v);
+  const ordem = cs.slice().sort((a, b) => (a.pago - b.pago) || (a.venc || '9').localeCompare(b.venc || '9'));
+  return `<div class="card">
+    <div class="row between" style="margin-bottom:6px"><span><b>${pagas.length} de ${cs.length} pagas</b></span><span class="row" style="gap:4px"><span class="num small">${falta ? 'faltam ' + money(falta) : 'tudo pago ✓'}</span>${tip(`Total do mês: ${money(sum(cs, c => c.v))}<br>Já pago: ${money(sum(pagas, c => c.v))}<br><br>O valor vem dos lançamentos do mês na subcategoria (ou forma) vinculada. Com “~” é estimado: ainda não lançado, usa o último fixo.`)}</span></div>
     ${barHtml(cs.length ? pagas.length / cs.length : 0)}
-    <div class="list" style="margin-top:8px">${cs.map(x => `<label class="li" style="cursor:pointer">
-      <input type="checkbox" class="check" style="width:22px;height:22px;accent-color:var(--brand)" data-act="pagar" data-id="${x.c.id}" ${x.pago ? 'checked' : ''}>
-      <div class="grow"><div class="t">${esc(x.c.nome)}</div><div class="tiny faint">${x.venc ? 'vence ' + dShort(x.venc) : 'sem vencimento'}${x.c.sub ? ' · ' + esc(x.c.sub) : x.c.forma ? ' · fatura ' + esc(x.c.forma) : ''}${x.est ? ' · valor estimado' : ''}${x.ck?.pagoEm ? ' · pago em ' + dShort(x.ck.pagoEm) : ''}</div></div>
-      <span class="tag ${x.cls}">${x.st}</span><b class="num">${money(x.v)}</b></label>`).join('') || '<div class="empty">Cadastre contas em Cadastros.</div>'}</div>
-    <p class="tiny muted">O valor vem dos lançamentos do mês na subcategoria (ou forma de pagamento) vinculada; se ainda não foi lançado, usa o último fixo ou o valor padrão.</p></div>`;
+    <div class="list" style="margin-top:8px">${ordem.map(x => `<div class="li conta ${x.pago ? 'paga' : ''}">
+      <input type="checkbox" class="check" style="width:22px;height:22px;accent-color:var(--brand);flex:none" data-act="pagar" data-id="${x.c.id}" ${x.pago ? 'checked' : ''} aria-label="Marcar ${esc(x.c.nome)} como paga">
+      <div class="grow click" data-act="editarConta" data-id="${x.c.id}"><div class="t">${esc(x.c.nome)}${x.man ? ' <span class="tag">ajustado</span>' : ''}</div>${x.pago ? (x.ck?.pagoEm ? `<div class="tiny faint">pago ${dShort(x.ck.pagoEm)}</div>` : '') : x.venc ? `<div class="tiny ${x.cls ? x.cls + '-t' : 'faint'}">${x.st === 'Vencida' ? 'venceu' : 'vence'} ${dShort(x.venc)}</div>` : ''}</div>
+      <b class="num click" data-act="editarConta" data-id="${x.c.id}">${x.est && !x.pago ? '~' : ''}${money(x.v)}</b></div>`).join('') || '<div class="empty">Nenhuma conta neste mês.</div>'}</div>
+    <button class="btn block" style="margin-top:12px" data-act="novaConta">+ Nova conta</button>
+    <p class="tiny muted center" style="margin:8px 0 0">Toque numa conta para mudar valor ou vencimento.</p></div>`;
 };
+
+/* ---- Contas: editar / nova ---- */
+function formConta(id) {
+  const m = state.mes, x = id ? contasDoMes(m).find(y => y.c.id === id) : null, c = x?.c;
+  const vinc = c?.sub ? `subcategoria ${esc(c.sub)}` : c?.forma ? `fatura ${esc(c.forma)}` : '';
+  openSheet(`${sheetHead(c ? 'Conta · ' + ymLong(m) : 'Nova conta')}
+  <form id="fConta" data-id="${c ? c.id : ''}" autocomplete="off">
+    <label class="field"><span>Nome</span><input class="input" name="nome" value="${esc(c?.nome || '')}" placeholder="Ex.: Escola, IPTU, Academia" required></label>
+    <div class="two"><label class="field"><span>Valor</span><input class="input" name="valor" inputmode="decimal" value="${x ? x.v.toFixed(2).replace('.', ',') : ''}" placeholder="0,00"></label>
+      <label class="field"><span>Vencimento</span><input class="input" type="date" name="venc" value="${x?.venc || (c ? '' : `${m}-${pad(Math.min(10, daysInMonth(m)))}`)}"></label></div>
+    ${vinc ? `<p class="hint">Valor automático vem dos lançamentos da ${vinc} (${money(x.auto)}). Se você mudar aqui, vale o seu valor.</p>` : ''}
+    <div class="field"><span>Vale para</span><div class="seg"><button type="button" class="${c ? 'on' : ''}" data-act="contaEscopo" data-v="mes">Só ${ymShort(m)}</button><button type="button" class="${c ? '' : 'on'}" data-act="contaEscopo" data-v="prox">${ymShort(m)} e seguintes</button></div>
+      <input type="hidden" name="escopo" value="${c ? 'mes' : 'prox'}"></div>
+    ${c ? '' : `<label class="field"><span>Vincular a uma subcategoria (opcional)</span><select class="input" name="sub"><option value="">— valor fixo —</option>${DB.config.subcategorias.filter(s => s.tipo !== 'Receita').map(s => `<option>${esc(s.nome)}</option>`).join('')}</select></label>`}
+    <div class="sheet-actions">
+      ${c ? `<button type="button" class="btn danger" data-act="removerConta" data-id="${c.id}">Remover</button>` : ''}
+      ${x?.man ? `<button type="button" class="btn" data-act="contaAuto" data-id="${c.id}">Voltar ao automático</button>` : ''}
+      <button type="submit" class="btn primary">Salvar</button></div>
+  </form>`);
+  $('#fConta').addEventListener('submit', e => { e.preventDefault(); salvarConta(); });
+}
+function salvarConta() {
+  const f = $('#fConta'), m = state.mes, id = f.dataset.id, nome = f.nome.value.trim();
+  if (!nome) return toast('Informe o nome.');
+  const valor = r2(parseNum(f.valor.value)), venc = f.venc.value || null, prox = f.escopo.value === 'prox';
+  const dia = venc ? +venc.slice(8, 10) : null;
+  const ck0 = id ? DB.checks.find(x => x.id === `${m}|${id}` && !x.deleted) : null;
+  if (!id) { // nova conta
+    const sub = f.sub.value || null;
+    DB.config.contas.push({ id: uid(), nome, dia, sub, forma: null, valorPadrao: valor || null, desde: m, ate: prox ? null : m });
+    saveConfig(); closeSheet(); render(); toast(prox ? `Conta criada para ${ymShort(m)} em diante` : `Conta criada só para ${ymShort(m)}`); return;
+  }
+  const c = DB.config.contas.find(x => x.id === id), x = contasDoMes(m).find(y => y.c.id === id);
+  let cfg = false;
+  if (c.nome !== nome) { c.nome = nome; cfg = true; }
+  if (prox) { c.dia = dia; if (valor) c.valorPadrao = valor; cfg = true; }
+  // neste mês: guarda o ajuste se diferente do automático
+  const precisaMan = valor && Math.abs(valor - x.auto) > 0.004;
+  const vencAuto = c.dia ? `${m}-${pad(Math.min(c.dia, daysInMonth(m)))}` : null;
+  const ck = { ...(ck0 || {}), id: `${m}|${id}`, mes: m, conta: id, deleted: false, pago: !!ck0?.pago };
+  ck.valorMan = precisaMan && !(prox && !c.sub && !c.forma) ? valor : null; // conta sem vínculo + "seguintes": o padrão já resolve
+  ck.venc = venc && venc !== vencAuto ? venc : null;
+  if (ck.pago) ck.valor = valor || x.v;
+  if (ck0 || ck.valorMan != null || ck.venc) upsert('checks', ck);
+  if (cfg) saveConfig();
+  closeSheet(); render(); toast('Conta atualizada' + (prox ? ` · vale para ${ymShort(m)} em diante` : ` · só ${ymShort(m)}`));
+}
 
 /* ---- Parcelados ---- */
 VIEWS.parcelados = () => {
@@ -867,7 +957,17 @@ VIEWS.parcelados = () => {
   const porMes = meses.map(mm => sum(ativos, g => sum(g.abertas.filter(p => p.mesPgto === mm), p => p.valor)));
   const sel = ativos.filter(g => state.sel.has(g.grupo));
   const porMesSel = meses.map(mm => sum(sel, g => sum(g.abertas.filter(p => p.mesPgto === mm), p => p.valor)));
-  return `<div class="stack">
+  const mobile = `<div class="stack mob">
+    <div class="card"><div class="row between"><span class="muted small">${ativos.length} parcelamentos ativos</span>${tip(`Sua regra: até ${R.maxParcelamentos} parcelamentos ao mesmo tempo.<br>Parcelas em ${ymShort(addM(cur, 1))}: ${money(porMes[0])} (de ${money(summary(addM(cur, 1)).rec)} de receita).`)}</div>
+      <div class="num" style="font-size:24px;font-weight:700">${money(sum(ativos, g => g.restante))}</div><div class="tiny faint">a pagar depois deste mês</div>
+      <div style="margin-top:12px">${meses.slice(0, 4).map((mm, i) => `<div class="catrow"><div class="row"><span class="grow small">${ymShort(mm)}</span><span class="num small"><b>${money(porMes[i] - (sel.length ? porMesSel[i] : 0))}</b>${sel.length ? ` <span class="faint tiny">era ${money(porMes[i])}</span>` : ''}</span></div>${barHtml(porMes[i] / (porMes[0] || 1), null, true)}</div>`).join('')}</div>
+      ${sel.length ? `<button class="btn primary block" style="margin-top:10px" data-act="antecipar">Antecipar ${sel.length} selecionado(s) · ${money(sum(sel, g => g.restante))}</button>` : ''}</div>
+    <div class="card"><h2>Compras parceladas ${tip('Marque compras para simular a antecipação: os meses acima mostram como ficariam.')}</h2><div class="list">
+      ${gs.filter(g => g.abertas.length).map(g => `<div class="li"><input type="checkbox" style="width:20px;height:20px;accent-color:var(--brand)" data-act="selParc" data-g="${g.grupo}" ${state.sel.has(g.grupo) ? 'checked' : ''}>
+        <div class="grow click" data-act="editar" data-id="${g.ps[0].id}"><div class="t ellipsis">${esc(g.desc)}</div><div class="tiny faint">faltam ${g.abertas.length} de ${g.de} · até ${ymShort(g.fim)}</div></div>
+        <b class="num small">${money(g.restante)}</b></div>`).join('') || '<div class="empty">Nenhuma compra parcelada em aberto.</div>'}
+    </div></div></div>`;
+  return `${mobile}<div class="stack desk">
     <div class="grid kpis">
       ${kpi('Parcelamentos ativos', `<span class="${ativos.length > R.maxParcelamentos ? 'warn-t' : ''}">${ativos.length}</span>`, `regra: até ${R.maxParcelamentos}`)}
       ${kpi('Saldo a pagar', money(sum(ativos, g => g.restante)), 'após o mês atual')}
@@ -894,10 +994,15 @@ VIEWS.indicadores = () => {
   const ult = Array.from({ length: 6 }, (_, i) => addM(m, i - 5));
   for (const mm of ult) for (const [k, v] of Object.entries(summary(mm).bySub)) (subs[k] ||= Array(6).fill(0))[ult.indexOf(mm)] = v;
   const rank = Object.entries(subs).map(([k, vs]) => ({ k, vs, avg: sum(vs) / 6, last: vs[5] })).sort((a, b) => b.avg - a.avg).slice(0, 15);
+  const pm = addM(curYM(), -1);
   return `<div class="grid c2">
-    <div class="stack"><div class="card"><h2>Alertas de ${ymLong(m)}</h2>${ins.map(alertHtml).join('') || '<div class="alert ok"><span class="ai">✓</span><div>Nenhum alerta.</div></div>'}</div>
-    <div class="card"><h2>Ajustes possíveis</h2>${sug.map(alertHtml).join('') || '<div class="muted small">Sem sugestões no momento.</div>'}</div></div>
-    <div class="card"><h2>Onde vai o dinheiro (6 meses)</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Subcategoria</th><th>Tendência</th><th class="n">Média/mês</th><th class="n">${ymShort(m)}</th></tr></thead><tbody>
+    <div class="stack">
+    <div class="card click" data-act="verResumo" data-m="${pm}"><div class="row"><span style="font-size:20px">📊</span><span class="grow"><b>Como foi ${ymLong(pm)}</b></span><span class="faint">›</span></div></div>
+    <div class="card"><h2>Alertas de ${ymLong(m)}</h2>${ins.map(alertMini).join('') || '<div class="alert ok"><span class="ai">✓</span><div>Nenhum alerta.</div></div>'}</div>
+    <div class="card"><h2>Ajustes possíveis</h2>${sug.map(alertMini).join('') || '<div class="muted small">Sem sugestões no momento.</div>'}</div></div>
+    <div class="card mob"><h2>Onde vai o dinheiro ${tip('Média dos últimos 6 meses por subcategoria. Em amarelo: o mês atual está bem acima da média.')}</h2>
+      ${rank.slice(0, 8).map(r => `<div class="li click" data-act="celula" data-sub="${esc(r.k)}"><div class="grow"><div class="t ellipsis">${esc(r.k)}</div><div class="tiny faint">média ${money(r.avg)}</div></div>${spark(r.vs, 60, 20)}<b class="num small ${r.last > r.avg * 1.25 && r.last - r.avg > 100 ? 'warn-t' : ''}" style="min-width:84px;text-align:right">${money(r.last)}</b></div>`).join('')}</div>
+    <div class="card desk"><h2>Onde vai o dinheiro (6 meses)</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Subcategoria</th><th>Tendência</th><th class="n">Média/mês</th><th class="n">${ymShort(m)}</th></tr></thead><tbody>
       ${rank.map(r => `<tr class="click" data-act="celula" data-sub="${esc(r.k)}"><td>${esc(r.k)}<div class="tiny faint">${esc(subInfo(r.k).cat)}</div></td><td>${spark(r.vs)}</td><td class="n">${money(r.avg)}</td><td class="n ${r.last > r.avg * 1.25 && r.last - r.avg > 100 ? 'warn-t' : ''}">${money(r.last)}</td></tr>`).join('')}
     </tbody></table></div></div></div>`;
 };
@@ -974,7 +1079,7 @@ function salvarCadastros() {
   C.categorias = categorias; C.subcategorias = subcategorias;
   C.limitesSemanais = rows('limites').filter(r => r.sub).map(r => ({ sub: renSub[r.sub] || r.sub, valor: parseNum(r.valor) }));
   C.formas = rows('formas').filter(r => r.nome).map(r => ({ nome: r.nome, cartao: !!r.cartao, fechamento: r.cartao ? (parseInt(r.fechamento) || 31) : null }));
-  C.contas = rows('contas').filter(r => r.nome).map(r => ({ id: r._id || uid(), nome: r.nome, dia: parseInt(r.dia) || null, sub: renSub[r.sub] || r.sub || null, forma: r.forma || null, valorPadrao: parseNum(r.valorPadrao) || null }));
+  C.contas = rows('contas').filter(r => r.nome).map(r => ({ ...(DB.config.contas.find(c => c.id === r._id) || {}), id: r._id || uid(), nome: r.nome, dia: parseInt(r.dia) || null, sub: renSub[r.sub] || r.sub || null, forma: r.forma || null, valorPadrao: parseNum(r.valorPadrao) || null }));
   C.instituicoes = rows('instituicoes').filter(r => r.nome).map(r => ({ nome: r.nome, saldo: parseNum(r.saldo) }));
   const g = n => $(`[name="${n}"]`, f).value;
   C.regras = { maxParcelamentos: parseInt(g('maxParcelamentos')) || 3, minParcelar: parseNum(g('minParcelar')), metaPoupanca: parseNum(g('metaPoupanca')) / 100, alertaAcimaMedia: parseNum(g('alertaAcimaMedia')) / 100 };
@@ -1188,6 +1293,18 @@ const ACTS = {
   encerrarFixo: t => { const l = DB.lancamentos.find(x => x.id === t.dataset.id); upsert('lancamentos', { ...l, fixoAte: curYM() }); closeSheet(); render(); toast('Recorrência encerrada'); },
   semana: t => { state.semana = +t.dataset.i; render(); },
   abrirProx: t => { SET.abrirProx = t.checked; saveSet(); toast(t.checked ? 'Início e Projeção vão abrir no mês seguinte' : 'Tudo abre no mês atual'); },
+  verResumo: t => openSheet(htmlResumoMes(t.dataset.m)),
+  dispensarResumo: (t, e) => { e.stopPropagation(); SET.resumoVisto = t.dataset.m; saveSet(); render(); },
+  editarConta: t => formConta(t.dataset.id),
+  novaConta: () => formConta(null),
+  contaEscopo: t => { const f = t.closest('form'); f.escopo.value = t.dataset.v; $$('[data-act="contaEscopo"]', f).forEach(b => b.classList.toggle('on', b === t)); },
+  contaAuto: t => { const m = state.mes, ck = DB.checks.find(x => x.id === `${m}|${t.dataset.id}` && !x.deleted); if (ck) upsert('checks', { ...ck, valorMan: null, venc: null }); closeSheet(); render(); toast('Voltou ao valor automático'); },
+  removerConta: t => {
+    const m = state.mes, c = DB.config.contas.find(x => x.id === t.dataset.id); if (!c) return;
+    if (!confirm(`Remover "${c.nome}" de ${ymShort(m)} em diante? Os meses anteriores continuam como estão.`)) return;
+    if (c.desde && c.desde >= m) DB.config.contas = DB.config.contas.filter(x => x !== c); else c.ate = addM(m, -1);
+    saveConfig(); closeSheet(); render(); toast('Conta removida a partir de ' + ymShort(m));
+  },
   ctrlModo: t => { state.ctrl = t.dataset.m; render(); },
   verFatura: t => { state.fatForma = t.dataset.forma; state.fatM = t.dataset.m || null; if (route() !== 'fatura') location.hash = '#/fatura'; else render(); },
   irMes: t => { state.mes = t.dataset.m; state.mesManual = true; render(); window.scrollTo(0, 0); },
@@ -1225,7 +1342,7 @@ const ACTS = {
   },
   pagar: t => {
     const id = `${state.mes}|${t.dataset.id}`, old = DB.checks.find(x => x.id === id);
-    const c = DB.config.contas.find(x => x.id === t.dataset.id), v = contaValor(c, state.mes).v;
+    const v = (contasDoMes(state.mes).find(x => x.c.id === t.dataset.id) || {}).v || 0;
     upsert('checks', { ...(old || {}), id, mes: state.mes, conta: t.dataset.id, pago: t.checked, pagoEm: t.checked ? todayISO() : null, valor: v, deleted: false });
     render();
   },
