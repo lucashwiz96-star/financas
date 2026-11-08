@@ -288,3 +288,13 @@ svg,img{max-width:100%}
   .topbar h1{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 }
 .sync{white-space:nowrap;flex:none}
+.ctrl-seg{max-width:320px;width:100%}
+@media (max-width:1023.98px){.ctrl-seg{max-width:none}}
+
+/* v6: dicas (tooltips) e visual enxuto */
+.tip-pop{position:fixed;z-index:80;max-width:min(280px,calc(100vw - 16px));background:var(--text);color:var(--bg);padding:10px 12px;border-radius:12px;font-size:13px;line-height:1.45;box-shadow:0 10px 30px rgba(0,0,0,.25);animation:tipIn .12s ease-out}
+@keyframes tipIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.info-btn.on-dark{background:rgba(255,255,255,.15);border-color:rgba(255,255,255,.3);color:#fff}
+.hero .row .lbl{opacity:.85}
+.mob .card > .list > .li:first-child{padding-top:2px}
+@media (max-width:1023.98px){.info-btn{width:26px;height:26px;font-size:13px;position:relative}.info-btn::after{content:"";position:absolute;inset:-8px}}

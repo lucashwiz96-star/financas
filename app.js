@@ -173,6 +173,21 @@ function weeklyData(m) {
   return { weeks, rows, curW };
 }
 
+/* fatura do cartão */
+const cartoes = () => DB.config.formas.filter(f => f.cartao);
+/** Fatura de `forma` que vence em `fm`: total e composição (compras, parcelas, fixos). */
+function faturaDe(forma, fm) {
+  const f = FORMAMAP.get(forma) || {}, ls = entriesFor(fm).filter(l => l.tipo === 'Despesa' && l.forma === forma);
+  const g = { compras: [], novasParc: [], parcelas: [], fixos: [] };
+  for (const l of ls) (l.fixo || l.virtual ? g.fixos : (l.de || 0) > 1 ? ((l.parcela || 1) > 1 ? g.parcelas : g.novasParc) : g.compras).push(l);
+  const mc = addM(fm, -1), dim = daysInMonth(mc), dia = Math.min(+f.fechamento || dim, dim);
+  const fecha = `${mc}-${String(dia).padStart(2, '0')}`, hoje = todayISO();
+  const dias = Math.round((new Date(fecha + 'T12:00') - new Date(hoje + 'T12:00')) / 864e5);
+  const porCat = {}; for (const l of ls) porCat[catOf(l)] = (porCat[catOf(l)] || 0) + l.valor;
+  return { forma, fm, ls, g, total: sum(ls, l => l.valor), tot: k => sum(g[k], l => l.valor), fecha, dias, aberta: dias >= 0, porCat };
+}
+const faturaAberta = forma => calcMesPgto(todayISO(), forma, 1);
+
 /* parcelamentos */
 function parcelGroups() {
   const g = groupBy(LIVE.filter(l => l.grupo && (l.de || 0) > 1), l => l.grupo), cur = curYM();
@@ -420,12 +435,16 @@ function updateSyncBadge() {
 }
 
 /* ---------------- UI base ---------------- */
-const state = { mes: curYM(), filtro: { q: '', tipo: '', cat: '', forma: '', periodo: 'compra', de: '', ate: '', ordem: 'data', fixo: '' }, projSub: true, sel: new Set() };
+/** Telas de caixa (Início, Projeção) abrem no mês seguinte: é quando a fatura do cartão de hoje é paga. */
+const MES_PROX = ['inicio', 'projecao'];
+const mesPadrao = r => SET.abrirProx !== false && MES_PROX.includes(r) ? addM(curYM(), 1) : curYM();
+const state = { mes: curYM(), mesManual: false, filtro: { q: '', tipo: '', cat: '', forma: '', periodo: 'compra', de: '', ate: '', ordem: 'data', fixo: '' }, projSub: true, sel: new Set() };
 const ROUTES = [
   { id: 'inicio', t: 'Visão geral', i: 'home' },
   { id: 'lancamentos', t: 'Lançamentos', i: 'list' },
   { id: 'projecao', t: 'Projeção', i: 'chart' },
-  { id: 'semanal', t: 'Semanal', i: 'week' },
+  { id: 'semanal', t: 'Controle', i: 'week' },
+  { id: 'fatura', t: 'Fatura do cartão', i: 'card' },
   { id: 'contas', t: 'Contas do mês', i: 'check' },
   { id: 'parcelados', t: 'Parcelados', i: 'card' },
   { id: 'indicadores', t: 'Alertas e ajustes', i: 'bulb' },
@@ -439,7 +458,7 @@ function buildNav() {
     <a href="#/inicio" data-r="inicio">${icon('home')}Início</a>
     <a href="#/lancamentos" data-r="lancamentos">${icon('list')}Extrato</a>
     <button class="fab" data-act="novo" aria-label="Novo lançamento"><span>+</span></button>
-    <a href="#/semanal" data-r="semanal">${icon('week')}Semana</a>
+    <a href="#/semanal" data-r="semanal">${icon('week')}Controle</a>
     <a href="#/mais" data-r="mais">${icon('more')}Mais</a>`;
 }
 let toastT;
@@ -451,9 +470,11 @@ const sheetHead = t => `<div class="sheet-head"><h3>${t}</h3><button class="icon
 function route() { return (location.hash.replace(/^#\/?/, '') || 'inicio').split('?')[0]; }
 function render() {
   const r = route();
+  if (!state.mesManual) state.mes = mesPadrao(r);
   const def = ROUTES.find(x => x.id === r) || { t: 'Mais' };
   $('#pageTitle').textContent = def.t;
-  $('#mesLabel').textContent = ymLong(state.mes) + (state.mes === curYM() ? '' : ' •');
+  $('#mesLabel').textContent = ymLong(state.mes) + (state.mes === mesPadrao(r) ? '' : ' •');
+  $('#mesLabel').title = state.mes === mesPadrao(r) ? '' : 'Toque para voltar ao mês padrão';
   $$('[data-r]').forEach(a => a.classList.toggle('active', a.dataset.r === r || (r !== 'inicio' && a.dataset.r === 'mais' && !['lancamentos', 'semanal'].includes(r))));
   const v = VIEWS[r] || VIEWS.inicio;
   $('#view').innerHTML = v();
@@ -520,12 +541,14 @@ VIEWS.inicio = () => {
   const recentes = entriesFor(m).filter(l => !l.virtual).sort((a, b) => (b.data || '').localeCompare(a.data || '') || (b.updatedAt || '').localeCompare(a.updatedAt || '')).slice(0, 6);
   const contas = contasDoMes(m), pagas = contas.filter(c => c.pago).length;
 
+  const cartaoDepois = sum(LIVE.filter(l => l.tipo === 'Despesa' && (l.data || '').slice(0, 7) === m && l.mesPgto === addM(m, 1) && !l.fixo), l => l.valor);
   const hero = `<div class="card hero">
       <div class="lbl">Saldo previsto de ${ymLong(m)}</div>
       <div class="big">${money(s.saldo)}</div>
       <div class="split"><div><span class="lbl">Receitas</span><b>${money(s.rec)}</b></div><div><span class="lbl">Despesas</span><b>${money(s.desp)}</b></div></div>
       <div class="meter"><i style="width:${Math.min(100, usoDesp * 100)}%"></i></div>
       <div class="lbl" style="margin-top:6px">${pct(usoDesp)} da receita comprometida · fatura ${money(s.fatura)}</div>
+      ${cartaoDepois ? `<div class="lbl" style="margin-top:4px">+ ${money(cartaoDepois)} comprados no cartão este mês vão para a fatura de ${ymShort(addM(m, 1))}</div>` : ''}
     </div>`;
 
   const kpis = `<div class="grid kpis desk">
@@ -556,6 +579,15 @@ VIEWS.inicio = () => {
         return `<div class="catrow"><div class="row"><span class="grow ellipsis">${esc(r.sub)}</span><span class="num small"><b>${money(w.v)}</b> <span class="faint">/ ${money(w.lim)}</span></span></div>${barHtml(w.lim ? w.v / w.lim : 0)}</div>`;
       }).join('')}</div>` : '';
 
+  const fatCard = cartoes().length ? `<div class="card"><h2>Fatura do cartão <a href="#/fatura">detalhes →</a></h2>${cartoes().map(c => {
+      const fa = faturaDe(c.nome, faturaAberta(c.nome)), fp = faturaDe(c.nome, curYM());
+      return `<div class="click" data-act="verFatura" data-forma="${esc(c.nome)}" data-m="${fa.fm}">
+        ${cartoes().length > 1 ? `<div class="tiny muted" style="margin-bottom:2px">${esc(c.nome)}</div>` : ''}
+        <div class="row between"><span class="muted small">Aberta · vence em ${ymShort(fa.fm)}</span><b class="num" style="font-size:20px">${money(fa.total)}</b></div>
+        <div class="tiny faint" style="margin:2px 0 8px">${fa.dias > 0 ? `fecha em ${fa.dias} ${fa.dias === 1 ? 'dia' : 'dias'} (${dShort(fa.fecha)})` : fa.dias === 0 ? 'fecha hoje' : 'fechada'} · compras ${money(fa.tot('compras') + fa.tot('novasParc'))} · parcelas antigas ${money(fa.tot('parcelas'))} · fixos ${money(fa.tot('fixos'))}</div></div>
+        ${fp.total ? `<div class="row between click sub-l" data-act="verFatura" data-forma="${esc(c.nome)}" data-m="${fp.fm}"><span class="muted small">Fechada · paga em ${ymShort(fp.fm)}</span><span class="num small"><b>${money(fp.total)}</b></span></div>` : ''}`;
+    }).join('<hr style="border:0;border-top:1px solid var(--border);margin:10px 0">')}</div>` : '';
+
   const recCard = `<div class="card"><h2>Últimos lançamentos <a href="#/lancamentos">extrato →</a></h2><div class="list">${recentes.map(liLanc).join('') || '<div class="empty">Nada lançado ainda.</div>'}</div></div>`;
 
   const contasCard = `<div class="card"><h2>Contas do mês <a href="#/contas">${pagas} de ${contas.length} pagas →</a></h2>
@@ -564,17 +596,42 @@ VIEWS.inicio = () => {
   const top = entriesFor(m).filter(l => l.tipo === 'Despesa').sort((a, b) => b.valor - a.valor).slice(0, 8);
   const topCard = `<div class="card desk"><h2>Maiores despesas do mês</h2><div class="tbl-wrap"><table class="tbl"><tbody>${top.map(l => `<tr class="click ${l.virtual ? 'virtual' : ''}" data-act="editar" data-id="${l.origem || l.id}"><td class="ellipsis" style="max-width:220px">${esc(l.desc)}${l.de > 1 ? ` <span class="tag">${l.parcela}/${l.de}</span>` : ''}${l.virtual ? ' <span class="tag">fixo</span>' : ''}</td><td class="muted">${esc(l.sub)}</td><td class="n">${money(l.valor)}</td></tr>`).join('')}</tbody></table></div></div>`;
 
-  return `<div class="stack">
-    <div class="mob">${hero}</div>
+  // ---- celular: só o essencial; detalhes nos ⓘ e nas telas próprias ----
+  const wdHoje = weeklyData(cur), cHoje = contasDoMes(cur), aPagar = cHoje.filter(c => !c.pago);
+  const ultimos = LIVE.slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')).slice(0, 5);
+  const heroTip = `Receitas ${money(s.rec)}<br>Despesas ${money(s.desp)}<br>${pct(usoDesp)} da receita comprometida<br>Fatura do cartão neste mês: ${money(s.fatura)}${s.aportes ? `<br>Aportes ${money(s.aportes)}` : ''}`;
+  const heroM = `<div class="card hero">
+      <div class="row between"><span class="lbl">Saldo previsto · ${ymLong(m)}</span>${tip(heroTip, 'on-dark')}</div>
+      <div class="big">${money(s.saldo)}</div>
+      <div class="meter"><i style="width:${Math.min(100, usoDesp * 100)}%"></i></div>
+      <div class="lbl" style="margin-top:6px">${pct(usoDesp)} da receita comprometida</div></div>`;
+  const fatM = cartoes().map(c => { const fa = faturaDe(c.nome, faturaAberta(c.nome)), fp = faturaDe(c.nome, cur);
+      return `<div class="li click" data-act="verFatura" data-forma="${esc(c.nome)}" data-m="${fa.fm}"><div class="ico">💳</div>
+        <div class="grow"><div class="t">Fatura ${cartoes().length > 1 ? esc(c.nome) : 'aberta'}</div><div class="tiny faint">vence ${ymShort(fa.fm)} · ${fa.dias > 0 ? `fecha em ${fa.dias}d` : 'fechada'}</div></div>
+        <b class="num">${money(fa.total)}</b>${tip(`Compras ${money(fa.tot('compras') + fa.tot('novasParc'))}<br>Parcelas antigas ${money(fa.tot('parcelas'))}<br>Fixos ${money(fa.tot('fixos'))}${fp.total ? `<br><br>Fatura fechada (paga em ${ymShort(cur)}): ${money(fp.total)}` : ''}`)}</div>`; }).join('');
+  const nAl = ins.filter(a => a.lvl !== 'ok').length;
+  const resumoM = `<div class="card"><div class="list">${fatM}
+      ${nAl ? `<a class="li click" href="#/indicadores" style="text-decoration:none;color:inherit"><div class="ico">⚠️</div><div class="grow"><div class="t">${nAl} ${nAl === 1 ? 'ponto' : 'pontos'} de atenção</div><div class="tiny faint ellipsis">${esc(ins[0].txt.replace(/<[^>]+>/g, '').slice(0, 70))}…</div></div><span class="faint">›</span></a>` : ''}
+      ${cHoje.length ? `<a class="li click" href="#/contas" style="text-decoration:none;color:inherit"><div class="ico">✅</div><div class="grow"><div class="t">Contas de ${ymShort(cur)}</div><div class="tiny faint">${cHoje.length - aPagar.length} de ${cHoje.length} pagas</div></div><span class="num small">${aPagar.length ? 'faltam ' + money(sum(aPagar, c => c.v)) : 'tudo pago ✓'}</span><span class="faint" style="margin-left:6px">›</span></a>` : ''}
+    </div></div>`;
+  const semRows = wdHoje.curW >= 0 ? wdHoje.rows.filter(r => r.limSem > 1).map(r => ({ r, w: r.sem[wdHoje.curW] })).sort((a, b) => b.w.v / (b.w.lim || 1) - a.w.v / (a.w.lim || 1)).slice(0, 3) : [];
+  const semM = semRows.length ? `<div class="card"><h2>Esta semana <a href="#/semanal">controle →</a></h2>${semRows.map(({ r, w }) => `<div class="catrow"><div class="row"><span class="grow ellipsis">${esc(r.sub)}</span><span class="num small"><b class="${w.over ? 'danger-t' : ''}">${money(w.v)}</b> <span class="faint">/ ${money(w.lim)}</span></span></div>${barHtml(w.lim ? w.v / w.lim : 0)}</div>`).join('')}</div>` : '';
+  const catM = cats.length ? `<div class="card"><h2>Maiores gastos de ${ymShort(m)} <a href="#/projecao">todos →</a></h2>${cats.slice(0, 4).map(([c, v]) => `<div class="catrow"><div class="row"><span>${catEmoji(c)}</span><span class="grow ellipsis">${esc(c)}</span><b class="num small">${money(v)}</b></div>${barHtml(v / (cats[0][1] || 1), null, true)}</div>`).join('')}</div>` : '';
+  const ultM = `<div class="card"><h2>Últimos lançados <a href="#/lancamentos">extrato →</a></h2><div class="list">${ultimos.map(liLanc).join('') || '<div class="empty">Nada lançado ainda.</div>'}</div></div>`;
+  const mobile = `<div class="stack mob">${heroM}${resumoM}${semM}${catM}${ultM}</div>`;
+
+  return `${mobile}<div class="stack desk">
     ${kpis}
     <div class="card desk"><h2>Receitas × despesas × saldo <a href="#/projecao">tabela →</a></h2>${chartMeses(months)}</div>
     <div class="grid c3">
-      <div class="stack">${alertCard}${catCard}</div>
+      <div class="stack">${fatCard}${alertCard}${catCard}</div>
       <div class="stack">${semCard}${contasCard}${topCard}<div class="mob">${recCard}</div></div>
     </div>
     <div class="desk">${recCard}</div>
   </div>`;
 };
+/** Botão ⓘ que abre um balão com o detalhe (HTML já escapado por quem chama). */
+const tip = (html, cls = '') => `<button type="button" class="info-btn ${cls}" data-tip="${esc(html)}" aria-label="Mais informações">i</button>`;
 const kpi = (l, v, s) => `<div class="card kpi"><div class="lbl">${l}</div><div class="val">${v}</div><div class="sub">${s || ''}</div></div>`;
 function liLanc(l) {
   const c = catOf(l), rec = l.tipo === 'Receita';
@@ -679,16 +736,18 @@ VIEWS.projecao = () => {
   const recSubs = [...new Set(S.flatMap(s => Object.keys(s.recBySub)))];
   const recRows = recSubs.map(sb => `<tr class="sub"><td>${esc(sb)}</td>${S.map(s => cell(s.recBySub[sb] || 0, s.m)).join('')}<td class="n">${money(sum(S, s => s.recBySub[sb] || 0))}</td></tr>`).join('');
 
+  const depois = LIVE.filter(l => l.tipo === 'Despesa' && (l.data || '').slice(0, 7) === state.mes && l.mesPgto > state.mes);
+  const depoisTot = sum(depois, l => l.valor), depoisProx = sum(depois.filter(l => l.mesPgto === addM(state.mes, 1)), l => l.valor);
   const sm = summary(state.mes), prox = Array.from({ length: 6 }, (_, i) => summary(addM(state.mes, i + 1)));
   const catsMes = Object.entries(sm.byCat).sort((a, b) => b[1] - a[1]);
   const subsDe = c => Object.entries(sm.bySub).filter(([x]) => subInfo(x).cat === c).sort((a, b) => b[1] - a[1]);
   const mobile = `<div class="stack mob">
     <div class="card"><div class="grid two-k">
       <div><div class="tiny muted">Receitas</div><div class="num pos" style="font-weight:700">${money(sm.rec)}</div></div>
-      <div><div class="tiny muted">Despesas</div><div class="num" style="font-weight:700">${money(sm.desp)}</div></div>
+      <div><div class="tiny muted">Despesas ${tip(`Fatura do cartão: ${money(sm.fatura)}${sm.aportes ? `<br>Aportes: ${money(sm.aportes)}` : ''}${sm.virtual ? `<br>${money(sm.virtual)} de fixos projetados` : ''}${depoisTot ? `<br><br>Compras de ${ymShort(state.mes)} no cartão (${money(depoisTot)}) não entram aqui: ${money(depoisProx)} caem em ${ymShort(addM(state.mes, 1))}${depoisTot - depoisProx > 0.005 ? ` e ${money(depoisTot - depoisProx)} nas parcelas seguintes` : ''}.` : ''}`)}</div><div class="num" style="font-weight:700">${money(sm.desp)}</div></div>
       <div><div class="tiny muted">Saldo do mês</div><div class="num ${sm.saldo < 0 ? 'neg' : 'pos'}" style="font-weight:700">${money(sm.saldo)}</div></div>
       <div><div class="tiny muted">Poupança</div><div class="num" style="font-weight:700">${pct(sm.poupanca)}</div></div></div>
-      <div class="tiny faint" style="margin-top:8px">Fatura do cartão ${money(sm.fatura)}${sm.aportes ? ` · aportes ${money(sm.aportes)}` : ''}${sm.virtual ? ` · ${money(sm.virtual)} de fixos projetados` : ''}</div></div>
+      </div>
     <div class="card"><h2>Despesas por categoria</h2>
       ${catsMes.map(([c, v]) => { const t = tetos[c]; return `<details class="cat-det"><summary><span class="grow ellipsis">${catEmoji(c)} ${esc(c)}</span><span class="num ${t && v > t ? 'danger-t' : ''}"><b>${money(v)}</b>${t ? ` <span class="faint tiny">/ ${moneyS(t)}</span>` : ''}</span></summary>
         <div class="list">${subsDe(c).map(([sb, sv]) => `<div class="row sub-l click" data-act="celula" data-sub="${esc(sb)}"><span class="grow ellipsis">${esc(sb)}</span><span class="num small">${money(sv)}</span></div>`).join('')}</div></details>`; }).join('') || '<div class="empty">Sem despesas neste mês.</div>'}</div>
@@ -705,6 +764,40 @@ VIEWS.projecao = () => {
         <tr><td colspan="${months.length + 2}" style="padding-top:16px"><b>Receitas por subcategoria</b></td></tr>${recRows}
         <tr><td colspan="${months.length + 2}" style="padding-top:16px"><b>Despesas por categoria${state.projSub ? ' e subcategoria' : ''}</b></td></tr>${cats}
       </tbody></table></div></div></div>`;
+};
+
+/* ---- Fatura do cartão ---- */
+VIEWS.fatura = () => {
+  const cs = cartoes();
+  if (!cs.length) return `<div class="card empty"><b>Nenhum cartão</b>Marque uma forma de pagamento como cartão (e o dia de fechamento) em <a class="link" href="#/cadastros">Cadastros</a>.</div>`;
+  const forma = cs.some(c => c.nome === state.fatForma) ? state.fatForma : cs[0].nome;
+  const ab = faturaAberta(forma), fm = state.fatM || ab;
+  const F = faturaDe(forma, fm), meses = Array.from({ length: 7 }, (_, i) => addM(ab, i - 2));
+  const status = fm === ab ? (F.dias > 0 ? `aberta · fecha em ${F.dias} ${F.dias === 1 ? 'dia' : 'dias'} (${dShort(F.fecha)})` : 'fecha hoje') : fm < ab ? 'fechada' : 'futura · por enquanto só parcelas e fixos';
+  const ant = faturaDe(forma, addM(fm, -1)).total, dif = F.total - ant;
+  const parte = (k, t, d) => F.tot(k) ? `<div class="row between sub-l"><span class="row" style="gap:2px">${t}${tip(d)}</span><b class="num">${money(F.tot(k))}</b></div>` : '';
+  const cats = Object.entries(F.porCat).sort((a, b) => b[1] - a[1]);
+  const grupo = (k, t) => F.g[k].length ? `<div class="day-h">${t} · ${money(F.tot(k))}</div><div class="list">${F.g[k].slice().sort((a, b) => (b.data || '').localeCompare(a.data || '')).map(liLanc).join('')}</div>` : '';
+  return `<div class="stack">
+    ${cs.length > 1 ? `<div class="seg ctrl-seg">${cs.map(c => `<button class="${c.nome === forma ? 'on' : ''}" data-act="verFatura" data-forma="${esc(c.nome)}" data-m="">${esc(c.nome)}</button>`).join('')}</div>` : ''}
+    <div class="chips">${meses.map(x => `<button class="chip ${x === fm ? 'on' : ''}" data-act="verFatura" data-forma="${esc(forma)}" data-m="${x}">${ymShort(x)}${x === ab ? ' •' : ''}</button>`).join('')}</div>
+    <div class="grid c2">
+      <div class="stack">
+        <div class="card hero"><div class="lbl">Fatura ${esc(forma)} · vence em ${ymLong(fm)}</div><div class="big">${money(F.total)}</div>
+          <div class="lbl">${status}</div>
+          <div class="lbl" style="margin-top:4px">${ant ? `${dif >= 0 ? '▲' : '▼'} ${money(Math.abs(dif))} vs. fatura anterior (${money(ant)})` : ''}</div></div>
+        <div class="card"><h2>Composição</h2>
+          ${parte('compras', 'Compras à vista', 'feitas no período desta fatura')}
+          ${parte('novasParc', '1ª parcela de compras novas', 'parceladas no período')}
+          ${parte('parcelas', 'Parcelas de compras anteriores', 'já estavam comprometidas')}
+          ${parte('fixos', 'Fixos e assinaturas', 'recorrentes mensais')}
+          ${F.total ? '' : '<div class="empty">Nada nesta fatura.</div>'}</div>
+        ${cats.length ? `<div class="card"><h2>Por categoria</h2>${cats.map(([c, v]) => `<div class="catrow"><div class="row"><span>${catEmoji(c)}</span><span class="grow ellipsis">${esc(c)}</span><b class="num small">${money(v)}</b><span class="tiny faint num" style="width:38px;text-align:right">${pct(v / F.total)}</span></div>${barHtml(v / (cats[0][1] || 1), null, true)}</div>`).join('')}</div>` : ''}
+      </div>
+      <div class="card"><h2>Lançamentos da fatura <span class="tiny muted">${F.ls.length}</span></h2>
+        ${grupo('compras', 'Compras')}${grupo('novasParc', 'Compras parceladas (1ª parcela)')}${grupo('parcelas', 'Parcelas anteriores')}${grupo('fixos', 'Fixos e assinaturas')}
+        ${F.ls.length ? '' : '<div class="empty">Nenhum lançamento.</div>'}</div>
+    </div></div>`;
 };
 
 /* ---- Semanal ---- */
@@ -727,8 +820,32 @@ VIEWS.semanal = () => {
       <td class="n"><b>${money(r.total)}</b></td><td class="n">${money(r.limMes)}</td><td class="n ${r.eco < 0 ? 'neg' : 'pos'}">${money(r.eco)}</td><td class="n" style="min-width:110px">${barHtml(r.uso)}<span class="tiny">${pct(r.uso)}</span></td><td class="n ${r.ritmo > r.limMes ? 'warn-t' : 'faint'}">${r.ritmo ? money(r.ritmo) : '–'}</td></tr>`).join('')}
     <tr class="tot"><td>Total</td><td class="n">${money(totLimSem)}</td>${wd.weeks.map((_, i) => `<td class="n">${money(sum(wd.rows, r => r.sem[i].v))}</td>`).join('')}<td class="n">${money(totMes)}</td><td class="n">${money(totLimMes)}</td><td class="n">${money(totLimMes - totMes)}</td><td class="n">${pct(totLimMes ? totMes / totLimMes : 0)}</td><td></td></tr>
     </tbody></table></div><p class="tiny muted">Semana em vermelho: gastou mais que o limite (semanas incompletas têm limite proporcional aos dias). Ritmo = projeção do mês no ritmo de gasto atual.</p></div>`;
-  return `<div class="stack">${mobile}${desk}</div>`;
+  const modo = state.ctrl || 'semana';
+  const seg = `<div class="seg ctrl-seg"><button class="${modo === 'semana' ? 'on' : ''}" data-act="ctrlModo" data-m="semana">Semanal</button><button class="${modo === 'mes' ? 'on' : ''}" data-act="ctrlModo" data-m="mes">Mensal</button></div>`;
+  return `<div class="stack">${seg}${modo === 'mes' ? controleMensal(m, wd) : mobile + desk}</div>`;
 };
+
+/** Visão mensal do Controle: quanto já foi de cada caixinha no mês e quanto ainda dá para gastar. */
+function controleMensal(m, wd) {
+  const cur = curYM(), dim = daysInMonth(m);
+  const restam = m === cur ? dim - +todayISO().slice(8, 10) + 1 : m > cur ? dim : 0;
+  const tot = sum(wd.rows, r => r.total), lim = sum(wd.rows, r => r.limMes), sobra = lim - tot;
+  const porDia = v => restam > 0 && v > 0 ? ` · dá ${money(v / restam)}/dia` : '';
+  const idx = new Map(wd.rows.map((r, k) => [r, k]));
+  const rows = wd.rows.slice().sort((a, b) => b.uso - a.uso);
+  const resumo = `<div class="card">
+    <div class="row between" style="margin-bottom:6px"><span class="muted small">Caixinhas em ${ymLong(m)}</span><span class="row" style="gap:6px"><span class="num"><b>${money(tot)}</b> <span class="faint">/ ${money(lim)}</span></span><button class="info-btn" data-act="infoSemana" aria-label="Resumo do mês">i</button></span></div>
+    ${barHtml(lim ? tot / lim : 0)}
+    <div class="tiny row between" style="margin-top:6px"><span class="${sobra < 0 ? 'danger-t' : 'pos'}">${sobra < 0 ? 'Estourou ' + money(-sobra) : 'Sobra ' + money(sobra) + porDia(sobra)}</span><span class="faint">${m === cur ? `faltam ${restam} ${restam === 1 ? 'dia' : 'dias'}` : m < cur ? 'mês encerrado' : 'mês futuro'}</span></div></div>`;
+  const lista = `<div class="card"><h2>Por caixinha <span class="tiny muted">mais usadas primeiro</span></h2>
+    ${rows.map(r => `<div class="catrow"><div class="row"><span class="grow ellipsis">${esc(r.sub)}</span><span class="num small"><b class="${r.eco < 0 ? 'danger-t' : ''}">${money(r.total)}</b> <span class="faint">/ ${money(r.limMes)}</span></span><button class="info-btn" data-act="infoCaixa" data-k="${idx.get(r)}" aria-label="Detalhes de ${esc(r.sub)}">i</button></div>${barHtml(r.uso)}
+      ${r.eco < 0 ? `<div class="tiny danger-t">estourou ${money(-r.eco)}</div>` : ''}</div>`).join('')}</div>`;
+  // tetos por categoria (mês de pagamento), se definidos em Cadastros
+  const s = summary(m), tetos = DB.config.categorias.filter(c => c.teto > 0);
+  const catCard = tetos.length ? `<div class="card"><h2>Tetos por categoria <span class="tiny muted">mês de pagamento</span></h2>${tetos.map(c => { const v = s.byCat[c.nome] || 0; return `<div class="catrow"><div class="row"><span class="grow ellipsis">${catEmoji(c.nome)} ${esc(c.nome)}</span><span class="num small"><b class="${v > c.teto ? 'danger-t' : ''}">${money(v)}</b> <span class="faint">/ ${money(c.teto)}</span></span></div>${barHtml(v / c.teto)}</div>`; }).join('')}</div>`
+    : `<p class="tiny muted" style="margin:0 4px">Dica: defina tetos mensais por categoria em <a class="link" href="#/cadastros">Cadastros</a> para controlá-los aqui também.</p>`;
+  return `<div class="grid c2 ctrl-mes"><div class="stack">${resumo}${catCard}</div>${lista}</div>`;
+}
 
 /* ---- Contas ---- */
 VIEWS.contas = () => {
@@ -889,6 +1006,9 @@ VIEWS.ajustes = () => { const pend = pendentesEnvio(); return `<div class="grid 
     <hr style="border:0;border-top:1px solid var(--border);margin:16px 0">
     <div class="row" style="flex-wrap:wrap"><button class="btn" data-act="backup">Baixar backup (.json)</button><button class="btn" data-act="csv">Exportar lançamentos (CSV)</button></div>
     <p class="small muted">${LIVE.length} lançamentos · ${DB.config.subcategorias.length} subcategorias · ${(JSON.stringify(DB).length / 1024).toFixed(0)} KB</p></div>
+  <div class="card"><h2>Mês ao abrir</h2>
+    <label class="check"><input type="checkbox" data-act="abrirProx" ${SET.abrirProx !== false ? 'checked' : ''}> Início e Projeção abrem no mês seguinte</label>
+    <p class="tiny muted">Compras no cartão de hoje são pagas na fatura do mês que vem; por isso o saldo que importa é o do mês seguinte. Controle, Extrato e Contas sempre abrem no mês atual. Toque no nome do mês, no topo, para voltar ao padrão.</p></div>
   <div class="card"><h2>Aparência</h2><div class="seg" style="max-width:320px">${['auto', 'light', 'dark'].map(t => `<button class="${(SET.theme || 'auto') === t ? 'on' : ''}" data-act="tema" data-t="${t}">${{ auto: 'Automático', light: 'Claro', dark: 'Escuro' }[t]}</button>`).join('')}</div></div>
   <div class="card"><h2>Zona de perigo</h2><button class="btn danger" data-act="limpar">Apagar dados deste aparelho</button><p class="tiny muted">Envie para o outro aparelho ou baixe um backup antes.</p></div>
 </div>`; };
@@ -1001,7 +1121,8 @@ function salvarLanc(mais) {
       for (let i = 1; i <= n; i++) arr.push({ id: uid(), ...base, fixo: false, valor: i === n ? r2(v - pv * (n - 1)) : pv, parcela: i, de: n, grupo, mesPgto: calcMesPgto(base.data, base.forma, i), antecipado: false });
       upsertMany('lancamentos', arr);
     }
-    toast(`${base.tipo} de ${money(v)} lançada ✓`);
+    const mp = calcMesPgto(base.data, base.forma, 1);
+    toast(`${base.tipo} de ${money(v)} lançada ✓` + (mp !== base.data.slice(0, 7) ? ` · entra em ${ymShort(mp)}${n > 1 ? ' a ' + ymShort(calcMesPgto(base.data, base.forma, n)) : ''} (fatura do cartão)` : ''));
   }
   if (mais) { const keep = { data: f.data.value, forma: f.forma.value, tipo: f.tipo.value }; formLanc(null); const nf = $('#fLanc'); nf.data.value = keep.data; setChip(nf, 'formaChips', 'forma', keep.forma); }
   else closeSheet();
@@ -1048,8 +1169,8 @@ function confirmarAntecipacao() {
 const ACTS = {
   novo: () => formLanc(null),
   fechar: () => closeSheet(),
-  mes: t => { state.mes = addM(state.mes, +t.dataset.d); state.semana = null; render(); },
-  mesHoje: () => { state.mes = curYM(); state.semana = null; render(); },
+  mes: t => { state.mes = addM(state.mes, +t.dataset.d); state.mesManual = true; state.semana = null; render(); },
+  mesHoje: () => { state.mesManual = false; state.mes = mesPadrao(route()); state.semana = null; render(); },
   sync: () => { if (SET.url) return sync(true); if (pendentesEnvio()) return enviarAparelho(); location.hash = '#/ajustes'; },
   enviarAparelho: () => enviarAparelho(),
   editar: t => { const l = DB.lancamentos.find(x => x.id === t.dataset.id); if (l) formLanc(l); },
@@ -1066,7 +1187,10 @@ const ACTS = {
   },
   encerrarFixo: t => { const l = DB.lancamentos.find(x => x.id === t.dataset.id); upsert('lancamentos', { ...l, fixoAte: curYM() }); closeSheet(); render(); toast('Recorrência encerrada'); },
   semana: t => { state.semana = +t.dataset.i; render(); },
-  irMes: t => { state.mes = t.dataset.m; render(); window.scrollTo(0, 0); },
+  abrirProx: t => { SET.abrirProx = t.checked; saveSet(); toast(t.checked ? 'Início e Projeção vão abrir no mês seguinte' : 'Tudo abre no mês atual'); },
+  ctrlModo: t => { state.ctrl = t.dataset.m; render(); },
+  verFatura: t => { state.fatForma = t.dataset.forma; state.fatM = t.dataset.m || null; if (route() !== 'fatura') location.hash = '#/fatura'; else render(); },
+  irMes: t => { state.mes = t.dataset.m; state.mesManual = true; render(); window.scrollTo(0, 0); },
   limparFiltros: () => { Object.assign(state.filtro, { tipo: '', cat: '', forma: '', fixo: '' }); render(); },
   infoCaixa: t => {
     const m = state.mes, wd = weeklyData(m), r = wd.rows[+t.dataset.k], cur = curYM();
@@ -1152,16 +1276,33 @@ const ACTS = {
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
 function applyTheme() { const t = SET.theme; if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
 
+function fecharDica() { $('#tipPop')?.remove(); }
+function abrirDica(btn) {
+  const aberto = $('#tipPop'); if (aberto && aberto._dono === btn) return fecharDica(); fecharDica();
+  const d = document.createElement('div'); d.id = 'tipPop'; d.className = 'tip-pop'; d.innerHTML = btn.getAttribute('data-tip'); d._dono = btn;
+  document.body.appendChild(d);
+  const b = btn.getBoundingClientRect(), W = document.documentElement.clientWidth, w = d.offsetWidth;
+  let left = Math.min(Math.max(8, b.left + b.width / 2 - w / 2), W - w - 8), top = b.bottom + 8;
+  if (top + d.offsetHeight > innerHeight - 80) top = Math.max(8, b.top - d.offsetHeight - 8);
+  d.style.left = left + 'px'; d.style.top = top + 'px';
+}
+document.addEventListener('click', e => {
+  const tb = e.target.closest('[data-tip]');
+  if (tb) { e.preventDefault(); e.stopPropagation(); return abrirDica(tb); }
+  if (!e.target.closest('#tipPop')) fecharDica();
+}, true);
+window.addEventListener('scroll', fecharDica, { passive: true });
+window.addEventListener('hashchange', fecharDica);
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-act]'); if (!t) return;
   const a = t.dataset.act; if (!ACTS[a]) return;
-  if (['pagar', 'selParc', 'projSub'].includes(a)) return; // tratados no change
+  if (['pagar', 'selParc', 'projSub', 'abrirProx'].includes(a)) return; // tratados no change
   if (t.tagName === 'A') e.preventDefault();
   ACTS[a](t, e);
 });
 document.addEventListener('change', e => {
   const t = e.target;
-  if (t.dataset.act && ['pagar', 'selParc', 'projSub'].includes(t.dataset.act)) return ACTS[t.dataset.act](t);
+  if (t.dataset.act && ['pagar', 'selParc', 'projSub', 'abrirProx'].includes(t.dataset.act)) return ACTS[t.dataset.act](t);
   if (t.id === 'fReceber') { const f = t.files[0]; t.value = ''; if (f) receberAparelho(f); return; }
   if (t.dataset.act === 'saldoInst') { const i = DB.config.instituicoes[+t.dataset.k]; i.saldo = r2(parseNum(t.value)); saveConfig(); render(); return; }
   if (t.dataset.filtro) { const f = state.filtro; f[t.dataset.filtro] = t.type === 'checkbox' ? t.checked : t.value; if (t.dataset.filtro === 'periodo' && t.value === 'datas' && !f.de && !f.ate) { f.de = state.mes + '-01'; f.ate = todayISO() >= f.de ? todayISO() : ''; } render(); }
@@ -1169,7 +1310,8 @@ document.addEventListener('change', e => {
 const filtroQ = debounce(v => { state.filtro.q = v; render(); const i = $('[data-filtro="q"]'); if (i) { i.focus(); i.setSelectionRange(v.length, v.length); } }, 300);
 document.addEventListener('input', e => { if (e.target.dataset.filtro === 'q') filtroQ(e.target.value); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#sheet').hidden) closeSheet(); if (e.key === 'n' && e.altKey) formLanc(null); });
-window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+let rotaAnt = null;
+window.addEventListener('hashchange', () => { const r = route(); if (r !== rotaAnt) state.mesManual = false; rotaAnt = r; render(); window.scrollTo(0, 0); });
 window.addEventListener('online', () => sync(false));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { sync(false); } });
 setInterval(() => { if (document.visibilityState === 'visible' && SET.dirty) sync(false); }, 60000);

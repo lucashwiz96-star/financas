@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Lançar">
+<title>Lançar</title>
+<link rel="manifest" href="novo.webmanifest">
+<link rel="apple-touch-icon" href="icons/lancar-192.png">
+<script>
+  // Aberto pelo ícone "Lançar" (modo app): vai direto para o formulário de lançamento.
+  var app = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone;
+  if (app || location.search.indexOf('ir=1') >= 0) location.replace('index.html#/inicio?novo=1');
+</script>
+<style>
+  body{margin:0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f4f6f8;color:#14212b;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+  .c{max-width:420px;background:#fff;border-radius:18px;padding:24px;box-shadow:0 6px 24px rgba(0,0,0,.08)}
+  img{width:64px;height:64px;border-radius:16px}
+  h1{font-size:20px;margin:12px 0 6px} ol{padding-left:20px} li{margin:6px 0} a{color:#0f766e}
+  @media (prefers-color-scheme:dark){body{background:#0d1419;color:#e6edf2}.c{background:#152029}}
+</style>
+</head>
+<body>
+<div class="c">
+  <img src="icons/lancar-192.png" alt="">
+  <h1>Atalho “Lançar”</h1>
+  <p>Coloque este atalho na tela inicial do celular. Ele abre o app direto no formulário de novo gasto.</p>
+  <ol>
+    <li><b>Android (Chrome):</b> menu ⋮ → <b>Adicionar à tela inicial</b> (ou “Instalar app”).</li>
+    <li><b>iPhone (Safari):</b> botão Compartilhar → <b>Adicionar à Tela de Início</b>.</li>
+  </ol>
+  <p><a href="index.html#/inicio?novo=1">Abrir o lançamento agora →</a></p>
+</div>
+</body>
+</html>
