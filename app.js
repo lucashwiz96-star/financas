@@ -420,7 +420,7 @@ function updateSyncBadge() {
 }
 
 /* ---------------- UI base ---------------- */
-const state = { mes: curYM(), filtro: { q: '', tipo: '', cat: '', forma: '', todos: false }, projSub: true, sel: new Set() };
+const state = { mes: curYM(), filtro: { q: '', tipo: '', cat: '', forma: '', periodo: 'compra', de: '', ate: '', ordem: 'data', fixo: '' }, projSub: true, sel: new Set() };
 const ROUTES = [
   { id: 'inicio', t: 'Visão geral', i: 'home' },
   { id: 'lancamentos', t: 'Lançamentos', i: 'list' },
@@ -444,7 +444,7 @@ function buildNav() {
 }
 let toastT;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => t.hidden = true, 3200); }
-function openSheet(html, wide) { const s = $('#sheet'), c = $('.sheet-card', s); c.className = 'sheet-card' + (wide ? ' wide' : ''); c.innerHTML = html; s.hidden = false; document.body.style.overflow = 'hidden'; }
+function openSheet(html, wide) { const s = $('#sheet'), c = $('.sheet-card', s); c.className = 'sheet-card' + (wide ? ' wide' : ''); c.innerHTML = html; rotularTabelas(c); s.hidden = false; document.body.style.overflow = 'hidden'; }
 function closeSheet() { $('#sheet').hidden = true; document.body.style.overflow = ''; }
 const sheetHead = t => `<div class="sheet-head"><h3>${t}</h3><button class="icon-btn" data-act="fechar" aria-label="Fechar">×</button></div>`;
 
@@ -457,9 +457,18 @@ function render() {
   $$('[data-r]').forEach(a => a.classList.toggle('active', a.dataset.r === r || (r !== 'inicio' && a.dataset.r === 'mais' && !['lancamentos', 'semanal'].includes(r))));
   const v = VIEWS[r] || VIEWS.inicio;
   $('#view').innerHTML = v();
+  rotularTabelas($('#view'));
   updateSyncBadge();
 }
 
+/** No celular as tabelas viram listas: cada célula recebe o nome da coluna (data-label). */
+function rotularTabelas(root) {
+  for (const t of root.querySelectorAll('table.tbl')) {
+    const ths = t.querySelectorAll('thead tr:first-child th'); if (!ths.length) continue;
+    const labels = []; ths.forEach(th => { const n = +th.getAttribute('colspan') || 1; for (let i = 0; i < n; i++) labels.push(th.textContent.trim()); });
+    for (const tr of t.querySelectorAll('tbody tr')) { let i = 0; for (const td of tr.children) { if (td.colSpan > 1) { i += td.colSpan; continue; } td.dataset.label = labels[i] || ''; i++; } }
+  }
+}
 /* ---------------- gráficos SVG ---------------- */
 function chartMeses(months) {
   const data = months.map(m => summary(m));
@@ -586,25 +595,51 @@ function emptyState() {
 /* ---- Lançamentos / extrato ---- */
 VIEWS.lancamentos = () => {
   const f = state.filtro, m = state.mes;
-  let ls = f.todos ? LIVE.slice() : entriesFor(m).slice();
+  let ls;
+  // fixas: no mês selecionado mostra as que valem para o mês (inclui as repetições projetadas)
+  if (f.periodo === 'pgto' || (f.periodo === 'compra' && f.fixo === 'sim')) ls = entriesFor(m).slice();
+  else if (f.periodo === 'compra') ls = LIVE.filter(l => (l.data || '').slice(0, 7) === m);
+  else if (f.periodo === 'datas') ls = LIVE.filter(l => l.data && (!f.de || l.data >= f.de) && (!f.ate || l.data <= f.ate));
+  else ls = LIVE.slice();
   if (f.tipo) ls = ls.filter(l => l.tipo === f.tipo);
   if (f.cat) ls = ls.filter(l => catOf(l) === f.cat);
   if (f.forma) ls = ls.filter(l => l.forma === f.forma);
+  if (f.fixo) ls = ls.filter(l => !!(l.fixo || l.virtual) === (f.fixo === 'sim'));
   if (f.q) { const q = f.q.toLowerCase(); ls = ls.filter(l => `${l.desc} ${l.sub} ${l.obs || ''} ${l.forma}`.toLowerCase().includes(q)); }
-  ls.sort((a, b) => (b.data || '').localeCompare(a.data || '') || (a.desc || '').localeCompare(b.desc || ''));
+  const porRecente = (a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '');
+  if (f.ordem === 'recente') ls.sort((a, b) => porRecente(a, b) || (b.data || '').localeCompare(a.data || ''));
+  else if (f.ordem === 'valor') ls.sort((a, b) => b.valor - a.valor);
+  else if (f.ordem === 'antiga') ls.sort((a, b) => (a.data || '9').localeCompare(b.data || '9') || porRecente(b, a));
+  else ls.sort((a, b) => (b.data || '').localeCompare(a.data || '') || porRecente(a, b));
+  const nFiltros = [f.tipo, f.cat, f.forma, f.fixo].filter(Boolean).length;
+  const descPeriodo = { pgto: 'com pagamento em ' + ymLong(m), compra: f.fixo === 'sim' ? 'fixos de ' + ymLong(m) : 'comprados em ' + ymLong(m), datas: (f.de || f.ate) ? `de ${f.de ? dShort(f.de) + '/' + f.de.slice(2, 4) : 'início'} até ${f.ate ? dShort(f.ate) + '/' + f.ate.slice(2, 4) : 'hoje'}` : 'no intervalo', todos: 'em todos os meses' }[f.periodo] || '';
   const tr = sum(ls.filter(l => l.tipo === 'Receita'), l => l.valor), td = sum(ls.filter(l => l.tipo === 'Despesa'), l => l.valor);
   const cats = [...new Set(DB.config.subcategorias.map(s => s.cat))];
   const filtros = `<div class="filters">
     <input class="input" type="search" placeholder="Buscar descrição, subcategoria, obs…" value="${esc(f.q)}" data-filtro="q">
+    <select class="input" data-filtro="periodo" title="Período">
+      <option value="compra" ${f.periodo === 'compra' ? 'selected' : ''}>Compra no mês</option>
+      <option value="pgto" ${f.periodo === 'pgto' ? 'selected' : ''}>Pagamento no mês</option>
+      <option value="datas" ${f.periodo === 'datas' ? 'selected' : ''}>Entre datas…</option>
+      <option value="todos" ${f.periodo === 'todos' ? 'selected' : ''}>Todos os meses</option></select>
+    <select class="input" data-filtro="ordem" title="Ordenar">
+      <option value="data" ${f.ordem === 'data' ? 'selected' : ''}>Mais novos</option>
+      <option value="recente" ${f.ordem === 'recente' ? 'selected' : ''}>Últimos lançados</option>
+      <option value="antiga" ${f.ordem === 'antiga' ? 'selected' : ''}>Mais antigos</option>
+      <option value="valor" ${f.ordem === 'valor' ? 'selected' : ''}>Maior valor</option></select>
+    ${f.periodo === 'datas' ? `<div class="datas"><label>de <input class="input" type="date" data-filtro="de" value="${esc(f.de)}"></label><label>até <input class="input" type="date" data-filtro="ate" value="${esc(f.ate)}"></label></div>` : ''}
+    <details class="mais-filtros" ${nFiltros ? 'open' : ''}><summary class="btn sm">Filtros${nFiltros ? ` (${nFiltros})` : ''}</summary><div class="filters" style="margin:8px 0 0">
     <select class="input" data-filtro="tipo"><option value="">Tudo</option><option ${f.tipo === 'Despesa' ? 'selected' : ''}>Despesa</option><option ${f.tipo === 'Receita' ? 'selected' : ''}>Receita</option></select>
     <select class="input" data-filtro="cat"><option value="">Todas as categorias</option>${cats.map(c => `<option ${f.cat === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
     <select class="input" data-filtro="forma"><option value="">Todas as formas</option>${DB.config.formas.map(x => `<option ${f.forma === x.nome ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select>
-    <label class="check small"><input type="checkbox" data-filtro="todos" ${f.todos ? 'checked' : ''}> todos os meses</label>
+    <select class="input" data-filtro="fixo"><option value="">Fixas e variáveis</option><option value="sim" ${f.fixo === 'sim' ? 'selected' : ''}>Só fixas (mensais)</option><option value="nao" ${f.fixo === 'nao' ? 'selected' : ''}>Só variáveis</option></select>
+    ${nFiltros ? '<button class="btn sm" data-act="limparFiltros">Limpar</button>' : ''}</div></details>
   </div>
-  <div class="row small" style="margin-bottom:10px;gap:14px;flex-wrap:wrap"><span class="muted">${ls.length} lançamentos ${f.todos ? '' : 'com pagamento em ' + ymLong(m)}</span><span class="pos">Receitas ${money(tr)}</span><span class="neg">Despesas ${money(td)}</span>
+  <div class="row small" style="margin-bottom:10px;gap:14px;flex-wrap:wrap"><span class="muted">${ls.length} lançamentos ${descPeriodo}</span><span class="pos">Receitas ${money(tr)}</span><span class="neg">Despesas ${money(td)}</span>
     <span class="grow"></span><button class="btn sm desk" data-act="csv">Exportar CSV</button></div>`;
 
   const mobile = (() => {
+    if (f.ordem !== 'data' && f.ordem !== 'antiga') return `<div class="list">${ls.slice(0, 400).map(liLanc).join('')}</div>` || '';
     const byDay = groupBy(ls.slice(0, 400), l => l.data || '');
     return Object.entries(byDay).map(([d, arr]) => `<div class="day-h">${dLong(d)}</div><div class="list">${arr.map(liLanc).join('')}</div>`).join('') || '<div class="empty">Nenhum lançamento.</div>';
   })();
@@ -644,9 +679,26 @@ VIEWS.projecao = () => {
   const recSubs = [...new Set(S.flatMap(s => Object.keys(s.recBySub)))];
   const recRows = recSubs.map(sb => `<tr class="sub"><td>${esc(sb)}</td>${S.map(s => cell(s.recBySub[sb] || 0, s.m)).join('')}<td class="n">${money(sum(S, s => s.recBySub[sb] || 0))}</td></tr>`).join('');
 
-  return `<div class="stack">
+  const sm = summary(state.mes), prox = Array.from({ length: 6 }, (_, i) => summary(addM(state.mes, i + 1)));
+  const catsMes = Object.entries(sm.byCat).sort((a, b) => b[1] - a[1]);
+  const subsDe = c => Object.entries(sm.bySub).filter(([x]) => subInfo(x).cat === c).sort((a, b) => b[1] - a[1]);
+  const mobile = `<div class="stack mob">
+    <div class="card"><div class="grid two-k">
+      <div><div class="tiny muted">Receitas</div><div class="num pos" style="font-weight:700">${money(sm.rec)}</div></div>
+      <div><div class="tiny muted">Despesas</div><div class="num" style="font-weight:700">${money(sm.desp)}</div></div>
+      <div><div class="tiny muted">Saldo do mês</div><div class="num ${sm.saldo < 0 ? 'neg' : 'pos'}" style="font-weight:700">${money(sm.saldo)}</div></div>
+      <div><div class="tiny muted">Poupança</div><div class="num" style="font-weight:700">${pct(sm.poupanca)}</div></div></div>
+      <div class="tiny faint" style="margin-top:8px">Fatura do cartão ${money(sm.fatura)}${sm.aportes ? ` · aportes ${money(sm.aportes)}` : ''}${sm.virtual ? ` · ${money(sm.virtual)} de fixos projetados` : ''}</div></div>
+    <div class="card"><h2>Despesas por categoria</h2>
+      ${catsMes.map(([c, v]) => { const t = tetos[c]; return `<details class="cat-det"><summary><span class="grow ellipsis">${catEmoji(c)} ${esc(c)}</span><span class="num ${t && v > t ? 'danger-t' : ''}"><b>${money(v)}</b>${t ? ` <span class="faint tiny">/ ${moneyS(t)}</span>` : ''}</span></summary>
+        <div class="list">${subsDe(c).map(([sb, sv]) => `<div class="row sub-l click" data-act="celula" data-sub="${esc(sb)}"><span class="grow ellipsis">${esc(sb)}</span><span class="num small">${money(sv)}</span></div>`).join('')}</div></details>`; }).join('') || '<div class="empty">Sem despesas neste mês.</div>'}</div>
+    ${Object.keys(sm.recBySub).length ? `<div class="card"><h2>Receitas</h2>${Object.entries(sm.recBySub).sort((a, b) => b[1] - a[1]).map(([sb, v]) => `<div class="row sub-l"><span class="grow ellipsis">${esc(sb)}</span><span class="num small pos">${money(v)}</span></div>`).join('')}</div>` : ''}
+    <div class="card"><h2>Próximos meses <span class="tiny muted">toque para abrir</span></h2>
+      ${prox.map(x => `<div class="row sub-l click" data-act="irMes" data-m="${x.m}"><span class="grow">${ymLong(x.m)}</span><span class="tiny faint" style="margin-right:10px">desp. ${moneyS(x.desp)}</span><span class="num small ${x.saldo < 0 ? 'neg' : 'pos'}"><b>${money(x.saldo)}</b></span></div>`).join('')}</div>
+  </div>`;
+  return `<div class="stack">${mobile}
     <div class="card desk"><h2>Evolução</h2>${chartMeses(months)}</div>
-    <div class="card"><h2>3 meses anteriores, mês selecionado e 6 seguintes
+    <div class="card desk"><h2>3 meses anteriores, mês selecionado e 6 seguintes
       <label class="check small"><input type="checkbox" data-act="projSub" ${state.projSub ? 'checked' : ''}> subcategorias</label></h2>
       <p class="small muted" style="margin:-4px 0 10px">Meses futuros = parcelas já lançadas + lançamentos fixos (em itálico no extrato). Cartão entra no mês de vencimento da fatura.</p>
       <div class="tbl-wrap"><table class="tbl sticky1"><thead>${head}</thead><tbody>${body}
@@ -666,10 +718,9 @@ VIEWS.semanal = () => {
   const totW = sum(wd.rows, r => r.sem[wsel].v), limW = sum(wd.rows, r => r.sem[wsel].lim);
   const mobile = `<div class="card mob">
       <div class="chips" style="margin-bottom:12px">${wd.weeks.map((x, i) => `<button class="chip ${i === wsel ? 'on' : ''}" data-act="semana" data-i="${i}">${dShort(x.de)}–${dShort(x.ate)}</button>`).join('')}</div>
-      <div class="row between" style="margin-bottom:6px"><span class="muted small">Semana ${wsel + 1}${m === cur && wsel === wd.curW ? ' (atual)' : ''}</span><span class="num"><b>${money(totW)}</b> <span class="faint">/ ${money(limW)}</span></span></div>
+      <div class="row between" style="margin-bottom:6px"><span class="muted small">Semana ${wsel + 1}${m === cur && wsel === wd.curW ? ' (atual)' : ''}</span><span class="row" style="gap:6px"><span class="num"><b>${money(totW)}</b> <span class="faint">/ ${money(limW)}</span></span><button class="info-btn" data-act="infoSemana" aria-label="Resumo do mês">i</button></span></div>
       ${barHtml(limW ? totW / limW : 0)}
-      <div style="margin-top:12px">${wd.rows.map(r => { const s = r.sem[wsel]; return `<div class="catrow"><div class="row"><span class="grow ellipsis">${esc(r.sub)}</span><span class="num small"><b class="${s.over ? 'danger-t' : ''}">${money(s.v)}</b> <span class="faint">/ ${money(s.lim)}</span></span></div>${barHtml(s.lim ? s.v / s.lim : 0)}
-        <div class="tiny faint row between"><span>mês: ${money(r.total)} de ${money(r.limMes)}</span><span class="${r.eco < 0 ? 'danger-t' : 'pos'}">${r.eco < 0 ? 'estourou ' + money(-r.eco) : 'sobra ' + money(r.eco)}</span></div></div>`; }).join('')}</div></div>`;
+      <div style="margin-top:12px">${wd.rows.map((r, k) => { const s = r.sem[wsel]; return `<div class="catrow"><div class="row"><span class="grow ellipsis">${esc(r.sub)}</span><span class="num small"><b class="${s.over ? 'danger-t' : ''}">${money(s.v)}</b> <span class="faint">/ ${money(s.lim)}</span></span><button class="info-btn" data-act="infoCaixa" data-k="${k}" aria-label="Detalhes de ${esc(r.sub)}">i</button></div>${barHtml(s.lim ? s.v / s.lim : 0)}</div>`; }).join('')}</div></div>`;
   const desk = `<div class="card desk"><h2>Controle do mês por semana <span class="small muted">data da compra · parcelado conta o total na semana da compra</span></h2>
     <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Caixinha</th><th class="n">Limite/sem</th>${wd.weeks.map((x, i) => `<th class="n ${m === cur && i === wd.curW ? 'cur' : ''}">S${i + 1}<br><span class="faint">${dShort(x.de)}–${dShort(x.ate)}</span></th>`).join('')}<th class="n">Total mês</th><th class="n">Limite mês</th><th class="n">Economia</th><th class="n">% usado</th><th class="n">Ritmo</th></tr></thead><tbody>
     ${wd.rows.map(r => `<tr class="click" data-act="celula" data-sub="${esc(r.sub)}" data-porcompra="1"><td>${esc(r.sub)}</td><td class="n">${money(r.limSem)}</td>${r.sem.map((s, i) => `<td class="n ${s.over ? 'over' : ''} ${m === cur && i === wd.curW ? 'cur' : ''}">${s.v ? money(s.v) : '<span class="faint">–</span>'}</td>`).join('')}
@@ -1015,6 +1066,33 @@ const ACTS = {
   },
   encerrarFixo: t => { const l = DB.lancamentos.find(x => x.id === t.dataset.id); upsert('lancamentos', { ...l, fixoAte: curYM() }); closeSheet(); render(); toast('Recorrência encerrada'); },
   semana: t => { state.semana = +t.dataset.i; render(); },
+  irMes: t => { state.mes = t.dataset.m; render(); window.scrollTo(0, 0); },
+  limparFiltros: () => { Object.assign(state.filtro, { tipo: '', cat: '', forma: '', fixo: '' }); render(); },
+  infoCaixa: t => {
+    const m = state.mes, wd = weeklyData(m), r = wd.rows[+t.dataset.k], cur = curYM();
+    const linha = (l, v, c = '') => `<div class="row between sub-l"><span class="muted">${l}</span><span class="num ${c}"><b>${v}</b></span></div>`;
+    openSheet(`${sheetHead(esc(r.sub) + ' · ' + ymLong(m))}
+      ${linha('Gasto no mês', money(r.total))}${linha('Limite do mês', money(r.limMes))}
+      ${linha(r.eco < 0 ? 'Estourou' : 'Sobra', money(Math.abs(r.eco)), r.eco < 0 ? 'neg' : 'pos')}
+      ${linha('Usado', pct(r.uso))}${r.ritmo ? linha('No ritmo atual, fecha o mês em', money(r.ritmo), r.ritmo > r.limMes ? 'warn-t' : '') : ''}
+      ${linha('Limite por semana', money(r.limSem))}
+      <h3 style="margin:16px 0 6px;font-size:14px">Semana a semana</h3>
+      ${r.sem.map((s, i) => `<div class="catrow"><div class="row"><span class="grow small">S${i + 1} · ${dShort(wd.weeks[i].de)}–${dShort(wd.weeks[i].ate)}${m === cur && i === wd.curW ? ' <span class="tag brand">atual</span>' : ''}</span><span class="num small"><b class="${s.over ? 'danger-t' : ''}">${money(s.v)}</b> <span class="faint">/ ${money(s.lim)}</span></span></div>${barHtml(s.lim ? s.v / s.lim : 0)}</div>`).join('')}
+      <button class="btn block" style="margin-top:14px" data-act="celula" data-sub="${esc(r.sub)}" data-porcompra="1">Ver compras do mês</button>`);
+  },
+  infoSemana: () => {
+    const m = state.mes, wd = weeklyData(m);
+    const tot = sum(wd.rows, r => r.total), lim = sum(wd.rows, r => r.limMes);
+    const piores = wd.rows.filter(r => r.eco < 0).sort((a, b) => a.eco - b.eco);
+    openSheet(`${sheetHead('Caixinhas · ' + ymLong(m))}
+      <div class="row between sub-l"><span class="muted">Gasto no mês</span><b class="num">${money(tot)}</b></div>
+      <div class="row between sub-l"><span class="muted">Limite do mês</span><b class="num">${money(lim)}</b></div>
+      <div class="row between sub-l"><span class="muted">${lim - tot < 0 ? 'Estourou' : 'Sobra'}</span><b class="num ${lim - tot < 0 ? 'neg' : 'pos'}">${money(Math.abs(lim - tot))}</b></div>
+      <h3 style="margin:16px 0 6px;font-size:14px">Por semana</h3>
+      ${wd.weeks.map((w, i) => { const v = sum(wd.rows, r => r.sem[i].v), l = sum(wd.rows, r => r.sem[i].lim); return `<div class="catrow"><div class="row"><span class="grow small">S${i + 1} · ${dShort(w.de)}–${dShort(w.ate)}</span><span class="num small"><b class="${v > l ? 'danger-t' : ''}">${money(v)}</b> <span class="faint">/ ${money(l)}</span></span></div>${barHtml(l ? v / l : 0)}</div>`; }).join('')}
+      ${piores.length ? `<h3 style="margin:16px 0 6px;font-size:14px">Estouradas no mês</h3>${piores.map(r => `<div class="row between sub-l"><span>${esc(r.sub)}</span><span class="num neg">+${money(-r.eco)}</span></div>`).join('')}` : ''}
+      <p class="tiny muted" style="margin-top:12px">Conta pela data da compra; parcelado entra inteiro na semana da compra. Semanas incompletas têm limite proporcional aos dias.</p>`);
+  },
   projSub: t => { state.projSub = t.checked; render(); },
   celula: t => {
     const sub = t.dataset.sub, m = state.mes;
@@ -1086,7 +1164,7 @@ document.addEventListener('change', e => {
   if (t.dataset.act && ['pagar', 'selParc', 'projSub'].includes(t.dataset.act)) return ACTS[t.dataset.act](t);
   if (t.id === 'fReceber') { const f = t.files[0]; t.value = ''; if (f) receberAparelho(f); return; }
   if (t.dataset.act === 'saldoInst') { const i = DB.config.instituicoes[+t.dataset.k]; i.saldo = r2(parseNum(t.value)); saveConfig(); render(); return; }
-  if (t.dataset.filtro) { state.filtro[t.dataset.filtro] = t.type === 'checkbox' ? t.checked : t.value; render(); }
+  if (t.dataset.filtro) { const f = state.filtro; f[t.dataset.filtro] = t.type === 'checkbox' ? t.checked : t.value; if (t.dataset.filtro === 'periodo' && t.value === 'datas' && !f.de && !f.ate) { f.de = state.mes + '-01'; f.ate = todayISO() >= f.de ? todayISO() : ''; } render(); }
 });
 const filtroQ = debounce(v => { state.filtro.q = v; render(); const i = $('[data-filtro="q"]'); if (i) { i.focus(); i.setSelectionRange(v.length, v.length); } }, 300);
 document.addEventListener('input', e => { if (e.target.dataset.filtro === 'q') filtroQ(e.target.value); });
