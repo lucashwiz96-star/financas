@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Finanças">
+<title>Finanças</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><img src="icons/icon.svg" alt=""><span>Finanças</span></div>
+    <nav id="sideNav"></nav>
+    <div class="side-foot"><button class="btn primary block" data-act="novo">+ Novo lançamento</button></div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div class="month-nav">
+        <button class="icon-btn" data-act="mes" data-d="-1" aria-label="Mês anterior">‹</button>
+        <button class="month-label" data-act="mesHoje" id="mesLabel"></button>
+        <button class="icon-btn" data-act="mes" data-d="1" aria-label="Próximo mês">›</button>
+      </div>
+      <h1 id="pageTitle"></h1>
+      <button class="sync" id="syncBtn" data-act="sync" title="Sincronizar"><span class="dot"></span><span class="sync-txt">Local</span></button>
+    </header>
+    <main id="view"></main>
+  </div>
+  <nav class="bottom-nav" id="bottomNav"></nav>
+</div>
+<div id="sheet" class="sheet" hidden><div class="sheet-bg" data-act="fechar"></div><div class="sheet-card" role="dialog" aria-modal="true"></div></div>
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
