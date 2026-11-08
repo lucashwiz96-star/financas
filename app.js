@@ -897,7 +897,7 @@ VIEWS.contas = () => {
     <div class="list" style="margin-top:8px">${ordem.map(x => `<div class="li conta ${x.pago ? 'paga' : ''}">
       <input type="checkbox" class="check" style="width:22px;height:22px;accent-color:var(--brand);flex:none" data-act="pagar" data-id="${x.c.id}" ${x.pago ? 'checked' : ''} aria-label="Marcar ${esc(x.c.nome)} como paga">
       <div class="grow click" data-act="editarConta" data-id="${x.c.id}"><div class="t">${esc(x.c.nome)}${x.man ? ' <span class="tag">ajustado</span>' : ''}</div>${x.pago ? (x.ck?.pagoEm ? `<div class="tiny faint">pago ${dShort(x.ck.pagoEm)}</div>` : '') : x.venc ? `<div class="tiny ${x.cls ? x.cls + '-t' : 'faint'}">${x.st === 'Vencida' ? 'venceu' : 'vence'} ${dShort(x.venc)}</div>` : ''}</div>
-      <b class="num click" data-act="editarConta" data-id="${x.c.id}">${x.est && !x.pago ? '~' : ''}${money(x.v)}</b></div>`).join('') || '<div class="empty">Nenhuma conta neste mês.</div>'}</div>
+      <b class="num click" data-act="editarConta" data-id="${x.c.id}">${x.est && !x.pago ? '~' : ''}${money(x.v)}</b><span class="editar click" data-act="editarConta" data-id="${x.c.id}" aria-label="Editar">›</span></div>`).join('') || '<div class="empty">Nenhuma conta neste mês.</div>'}</div>
     <button class="btn block" style="margin-top:12px" data-act="novaConta">+ Nova conta</button>
     <p class="tiny muted center" style="margin:8px 0 0">Toque numa conta para mudar valor ou vencimento.</p></div>`;
 };

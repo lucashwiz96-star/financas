@@ -313,3 +313,7 @@ details.alert.mini + details.alert.mini{margin-top:8px}
 .li.conta.paga .t{color:var(--faint);text-decoration:line-through}
 .li.conta.paga .num{color:var(--faint)}
 .card > h2 .info-btn{vertical-align:middle}
+
+/* iPhone (Safari) só dispara o toque em elementos "clicáveis": sem isto, tocar em divs com data-act não fazia nada */
+.click,[data-act],[data-tip]{cursor:pointer;-webkit-tap-highlight-color:rgba(15,118,110,.12)}
+.li.conta .editar{color:var(--faint);font-size:18px;padding-left:4px}
